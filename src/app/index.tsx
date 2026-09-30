@@ -27,9 +27,8 @@ import {
   Trash2,
   User,
   X,
-
 } from "lucide-react-native";
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState } from "react";
 
 import {
   Alert,
@@ -45,8 +44,7 @@ import {
   Text,
   TextInput,
   TextProps,
-  View,
-  ActivityIndicator
+  View
 } from "react-native";
 import RNMap, { Marker, PROVIDER_GOOGLE, Region } from "react-native-maps";
 import { supabase } from "../lib/supabase";
