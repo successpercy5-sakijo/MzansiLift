@@ -544,7 +544,7 @@ function ServicesScreen() {
   const [expanded, setExpanded] = useState<string | null>(null);
   return (
     <ScrollView contentContainerStyle={{ padding: 16, paddingTop: 24 }}>
-      <T mono style={[s.muted, { marginBottom: 4 }]}>Intercity</T>
+      <T mono style={[s.muted, { marginBottom: 4 }]}>LyftClub</T>
       <T style={s.h2}>Services</T>
       <Pressable style={[s.row, s.bookTrip]}>
         <View style={s.tripIcon}><Car size={22} color="#fff" /></View>
