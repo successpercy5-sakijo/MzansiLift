@@ -775,12 +775,16 @@ function refreshAvatar(id: string) {
 async function resolveAvatar(id: string): Promise<string | undefined> {
   const hit = avatarCache[id];
   if (hit && Date.now() - hit.at < 60_000) return hit.url;
-  const { data, error } = await supabase.storage.from("avatars").list(id, { limit: 1, search: "avatar" });
+  const { data, error } = await supabase.storage.from("avatars").list(id, { limit: 100 });
   if (error) return hit?.url;
-  const f: any = data?.[0];
+  const f: any = (data ?? []).find((x: any) => x.name === "avatar"); // exact file only, ignore leftovers like avatar.jpg
+  const base = supabase.storage.from("avatars").getPublicUrl(`${id}/avatar`).data.publicUrl;
+  // If the listing finds the file, use its updated_at as the version. If the listing is empty (for example the bucket has no
+  // SELECT policy so list() returns nothing), still try the public link with a per-minute version. A missing file just 404s
+  // and the Avatar falls back to the initials, so a photo is never hidden by a failed listing.
   const url = f
-    ? `${supabase.storage.from("avatars").getPublicUrl(`${id}/avatar`).data.publicUrl}?v=${new Date(f.updated_at ?? f.created_at ?? 0).getTime()}`
-    : undefined; // file deleted -> show initials
+    ? `${base}?v=${new Date(f.updated_at ?? f.created_at ?? 0).getTime()}`
+    : `${base}?v=m${Math.floor(Date.now() / 60_000)}`;
   avatarCache[id] = { url, at: Date.now() };
   return url;
 }
@@ -884,6 +888,12 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
     try {
       const path = `${user.id}/avatar`;
       await uploadPhoto("avatars", path, pic, true);
+      // Remove leftover files in this user's folder (e.g. avatar.jpg from older versions) so only one avatar exists
+      try {
+        const { data: files } = await supabase.storage.from("avatars").list(user.id, { limit: 100 });
+        const stale = (files ?? []).filter((f: any) => f.name !== "avatar").map((f: any) => `${user.id}/${f.name}`);
+        if (stale.length) await supabase.storage.from("avatars").remove(stale);
+      } catch { /* cleanup is best-effort */ }
       const url = `${supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl}?v=${Date.now()}`;
       const { error } = await supabase.auth.updateUser({ data: { avatar_url: url } });
       if (error) throw new Error(error.message);
@@ -2292,15 +2302,18 @@ type OpenTrip = {
 
 // Car photos for riders live in their own PUBLIC bucket "car-photos", separate from the private "driver-docs" bucket that holds licences.
 // Which car photo belongs to which APPROVED driver (separate view, so the main trips list never depends on it)
-const carPathCache: Record<string, string | null> = {};
+// Entries expire after 60s so a changed or removed car photo is picked up without restarting the app.
+const carPathCache: Record<string, { path: string | null; at: number }> = {};
+const carPathOf = (id: string) => carPathCache[id]?.path ?? null;
 async function loadCarPaths(driverIds: string[]) {
-  const need = driverIds.filter((id) => !(id in carPathCache));
+  const now = Date.now();
+  const need = driverIds.filter((id) => !carPathCache[id] || now - carPathCache[id].at > 60_000);
   if (!need.length) return;
   try {
     const { data, error } = await supabase.from("approved_car_photos").select("driver_id, car_photo_path").in("driver_id", need);
     if (error) return;
-    need.forEach((id) => { carPathCache[id] = null; });
-    (data ?? []).forEach((r: any) => { carPathCache[r.driver_id] = r.car_photo_path; });
+    need.forEach((id) => { carPathCache[id] = { path: null, at: now }; });
+    (data ?? []).forEach((r: any) => { carPathCache[r.driver_id] = { path: r.car_photo_path, at: now }; });
   } catch { /* photos are optional, the list still works without them */ }
 }
 const carPhotoUrl = (path?: string | null) => (path ? supabase.storage.from("car-photos").getPublicUrl(path).data.publicUrl : null);
@@ -2359,14 +2372,14 @@ function useTripSearch(active: boolean, from: string, to: string, day: Date | nu
         ...r,
         price: Number(r.price), rating: Number(r.rating), seats_total: Number(r.seats_total),
         seats_left: Number(r.seats_left), driver_trips: Number(r.driver_trips),
-        car_photo_url: carPhotoUrl(carPathCache[r.driver_id]),
+        car_photo_url: carPhotoUrl(carPathOf(r.driver_id)),
       }));
       // Trips with free seats first, then by departure time
       rows.sort((a, b) => (b.seats_left > 0 ? 1 : 0) - (a.seats_left > 0 ? 1 : 0) || new Date(a.depart_at).getTime() - new Date(b.depart_at).getTime());
       setTrips(rows);
       // Photos load after the list is already on screen; a failure here never hides trips
       loadCarPaths(Array.from(new Set(rows.map((r) => r.driver_id)))).then(() => {
-        if (!cancelled) setTrips((cur) => cur.map((r) => ({ ...r, car_photo_url: carPhotoUrl(carPathCache[r.driver_id]) })));
+        if (!cancelled) setTrips((cur) => cur.map((r) => ({ ...r, car_photo_url: carPhotoUrl(carPathOf(r.driver_id)) })));
       });
     };
     setLoading(true);
