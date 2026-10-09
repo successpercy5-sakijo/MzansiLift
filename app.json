@@ -4,13 +4,17 @@
     "slug": "mzansilift",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/mzansilift-icon.png",
+    "icon": "./assets/icon.png",
     "scheme": "mzansilift",
     "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "za.co.mzansilift",
+      "supportsTablet": false
+    },
     "android": {
-      "package": "com.percy.mzansilift",
+      "package": "za.co.mzansilift",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/mzansilift-adaptive-foreground.png",
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#FFFFFF"
       },
       "predictiveBackGestureEnabled": false,
@@ -26,17 +30,28 @@
     "plugins": [
       "expo-router",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "MzansiLift uses your photos for your profile picture and driver documents.",
+          "cameraPermission": "MzansiLift uses your camera to take your profile picture and driver documents."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "backgroundColor": "#FFFFFF",
+          "dark": {
+            "image": "./assets/splash-icon.png",
+            "backgroundColor": "#0a0b14"
+          }
         }
       ],
       [
         "react-native-maps",
         {
-          "androidGoogleMapsApiKey": "AIzaSyDAudaud7AHGYOhT8PGbW9EBjAjM5bgXwAS"
+          "androidGoogleMapsApiKey": "AIzaSyA0g1r6k3J4x5y6z7a8b9c0d1e2f3g4h5i"
         }
       ],
       [

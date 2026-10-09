@@ -1,9 +1,13 @@
+"use no memo";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as DocumentPicker from "expo-document-picker";
+import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import {
   Activity,
   AlertCircle,
   ArrowRight,
+  Banknote,
   Camera,
   Car,
   CheckCircle,
@@ -11,12 +15,15 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  CreditCard,
   Eye, EyeOff,
   FileText,
+  Globe,
   Heart,
   HelpCircle,
   Home,
   Info,
+  Landmark,
   Layers,
   Lock,
   Mail,
@@ -36,12 +43,12 @@ import {
   Trash2,
   User,
   X,
-  Globe,
   type LucideIcon,
 } from "lucide-react-native";
 import React, { useEffect, useState } from "react";
 import {
   Alert,
+  Appearance,
   Image,
   KeyboardAvoidingView,
   Linking,
@@ -64,6 +71,7 @@ import { WebView } from "react-native-webview";
 import { supabase } from "../lib/supabase";
 
 // ---------- Theme (dark + light) ----------
+
 const DARK = {
   bg: "#0a0b14", card: "#12131f", secondary: "#1a1c2c", border: "#262a3d", track: "#262a3d",
   primary: "#2563eb", fg: "#f1f5f9", fg2: "rgba(241,245,249,0.8)", fgSoft: "rgba(241,245,249,0.4)",
@@ -83,6 +91,10 @@ function applyTheme(name: "dark" | "light") {
   Object.assign(C, name === "light" ? LIGHT : DARK);
   Object.assign(s, makeStyles());
 }
+let KEEP_SETTINGS_OPEN = false; // lets the Settings window reopen itself after a theme change remounts the app
+// Logos for each theme (swap the two file names if they look the wrong way round)
+const LOGO_DARK = require("../../assets/mzansilift-logo-dark.png");
+const LOGO_LIGHT = require("../../assets/mzansilift-logo-light.png");
 const MONO = Platform.select({ ios: "Menlo", android: "monospace" });
 const TOP = Platform.OS === "android" ? (StatusBar.currentHeight ?? 24) : 0;
 
@@ -102,8 +114,21 @@ const SUPPORT_WHATSAPP = "+27837627597"; // no + sign
 const SUPPORT_WEBSITE = "https://www.mzanzilift.co.za";
 
 // ---------- App settings (saved on the phone) ----------
-type AppSettings = { mode: "rider" | "driver"; showLocation: boolean; theme: "system" | "light" | "dark" };
-const DEFAULT_SETTINGS: AppSettings = { mode: "rider", showLocation: true, theme: "dark" };
+type PayMethod = "cash" | "card" | "eft";
+type AppSettings = { mode: "rider" | "driver"; showLocation: boolean; theme: "system" | "light" | "dark"; payment: PayMethod };
+const DEFAULT_SETTINGS: AppSettings = { mode: "rider", showLocation: true, theme: "dark", payment: "cash" };
+
+// ---------- Payment options ----------
+// Only cash works today. Card and Instant EFT show as "Coming soon" until a payment provider is connected
+// (then set available: true and charge the rider when the driver accepts).
+const PAYMENT_METHODS: { id: PayMethod; label: string; short: string; sub: string; icon: LucideIcon; available: boolean }[] = [
+  { id: "cash", label: "Cash", short: "Cash", sub: "Pay the driver in cash when you travel", icon: Banknote, available: true },
+  { id: "card", label: "Card", short: "Card", sub: "Pay in the app with your bank card", icon: CreditCard, available: false },
+  { id: "eft", label: "Instant EFT", short: "EFT", sub: "Pay straight from your banking app", icon: Landmark, available: false },
+];
+const payName = (m?: string | null) => PAYMENT_METHODS.find((x) => x.id === m)?.label ?? "Cash";
+const ONE_TRIP_TITLE = "You already have a trip posted";
+const ONE_TRIP_MSG = "Finish your current trip before posting another. Once it is marked completed (or you cancel it) you can post a new one.";
 const SettingsCtx = React.createContext<{ settings: AppSettings; update: (p: Partial<AppSettings>) => void }>({
   settings: DEFAULT_SETTINGS,
   update: () => { },
@@ -117,7 +142,7 @@ const PROVINCES = [
   { name: "Mpumalanga", desc: "Nelspruit · Witbank", available: false },
 ];
 const ACCOUNT_MENU = [
-  { icon: Settings, label: "Manage Account" }, { icon: Settings, label: "Settings" },
+  { icon: Settings, label: "Manage Account" }, { icon: CreditCard, label: "Payment methods" }, { icon: Settings, label: "Settings" },
   { icon: Car, label: "Be a driver" }, { icon: Shield, label: "Safety" },
   { icon: HelpCircle, label: "Help" }, { icon: FileText, label: "Legal" },
   { icon: Heart, label: "Contact us" }, { icon: Info, label: "About us" },
@@ -154,6 +179,8 @@ const MAP_HTML = `<!DOCTYPE html><html><head>
   html,body,#map{height:100%;margin:0;background:#0a0b14}
   .leaflet-control-attribution{background:rgba(10,11,20,.7)!important;color:#566078!important;font-size:9px}
   .leaflet-control-attribution a{color:#566078!important}
+  .lt .leaflet-control-attribution{background:rgba(255,255,255,.8)!important;color:#64748b!important}
+  .lt .leaflet-control-attribution a{color:#64748b!important}
   .me{width:16px;height:16px;border-radius:50%;background:#2563eb;border:3px solid #fff;box-shadow:0 0 0 6px rgba(37,99,235,.3)}
   .pin{width:16px;height:16px;border-radius:50%;background:#ef4444;border:3px solid #fff;box-shadow:0 0 0 6px rgba(239,68,68,.3)}
   .drv{width:24px;height:24px;border-radius:50%;background:rgba(37,99,235,.25);display:flex;align-items:center;justify-content:center}
@@ -171,8 +198,9 @@ if (typeof L === 'undefined') {
     dark: L.tileLayer('https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png' + KEY, { maxZoom: 19 }),
     light: L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png' + KEY, { maxZoom: 19 })
   };
-  var current = 'dark';
-  layers.dark.addTo(map);
+  var current = '__INIT__';
+  layers[current].addTo(map);
+  document.body.className = current === 'light' ? 'lt' : '';
   var meM = null, pinM = null, drvM = [], lastRecenter = 0;
 
   function post(o) { if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify(o)); }
@@ -183,6 +211,7 @@ if (typeof L === 'undefined') {
     if (d.style && d.style !== current && layers[d.style]) {
       map.removeLayer(layers[current]); layers[d.style].addTo(map); current = d.style;
     }
+    if (d.style) document.body.className = d.style === 'light' ? 'lt' : '';
     if (d.me) {
       var ll = [d.me.latitude, d.me.longitude];
       if (!meM) {
@@ -214,6 +243,10 @@ function MapView({ me, drivers = [], pin = null, dark = true, recenterKey = 0, o
   const webRef = React.useRef<WebView>(null);
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
+  const html = React.useMemo(
+    () => MAP_HTML.replace("background:#0a0b14", `background:${C.bg}`).replace("__INIT__", THEME),
+    []
+  );
 
   // Sends your position, the pin and the map style into the page whenever they change
   const payload = JSON.stringify({ me, drivers, pin, style: dark ? "dark" : "light", recenter: recenterKey, bg: C.bg });
@@ -228,7 +261,7 @@ function MapView({ me, drivers = [], pin = null, dark = true, recenterKey = 0, o
         ref={webRef}
         style={{ flex: 1, backgroundColor: C.bg }}
         originWhitelist={["*"]}
-        source={{ html: MAP_HTML, baseUrl: "https://localhost" }}
+        source={{ html, baseUrl: "https://localhost" }}
         javaScriptEnabled
         domStorageEnabled
         scrollEnabled={false}
@@ -406,7 +439,7 @@ function SeatsBadge({ left, total }: { left: number; total: number }) {
 }
 
 // ---------- Account: sign in + manage account ----------
-type UserT = { id?: string; name: string; phone: string; email: string };
+type UserT = { id?: string; name: string; phone: string; email: string; avatar?: string };
 type BookingStart = { pickup?: string; dest?: string };
 const AuthCtx = React.createContext<{
   user: UserT | null;
@@ -418,7 +451,7 @@ const AuthCtx = React.createContext<{
 }>({ user: null, setUser: () => { }, openAuth: () => { }, openDriver: () => { }, startBooking: () => { }, isDriver: false });
 
 const toUser = (u?: { id?: string; email?: string; user_metadata?: any } | null): UserT | null =>
-  u ? { id: u.id, name: u.user_metadata?.full_name || (u.email ?? "").split("@")[0], phone: u.user_metadata?.phone ?? "", email: u.email ?? "" } : null;
+  u ? { id: u.id, name: u.user_metadata?.full_name || (u.email ?? "").split("@")[0], phone: u.user_metadata?.phone ?? "", email: u.email ?? "", avatar: u.user_metadata?.avatar_url ?? "" } : null;
 
 const getGreeting = () => {
   const h = new Date().getHours();
@@ -436,6 +469,7 @@ const Field = (p: React.ComponentProps<typeof TextInput> & { label: string }) =>
       <View>
         <TextInput
           {...p}
+          keyboardAppearance={THEME}
           secureTextEntry={isPassword && !show}
           placeholderTextColor={C.muted}
           style={{
@@ -466,6 +500,110 @@ const Field = (p: React.ComponentProps<typeof TextInput> & { label: string }) =>
   );
 };
 
+// ---------- Photos: pick from camera/library and upload to Supabase Storage ----------
+type Picked = { uri: string; mime: string; name?: string; b64?: string };
+const extOf = (mime: string) => (mime.includes("pdf") ? "pdf" : mime.includes("png") ? "png" : "jpg");
+
+async function pickPhoto(opts?: { square?: boolean }): Promise<Picked | null> {
+  const choice = await new Promise<"camera" | "library" | null>((resolve) =>
+    Alert.alert("Add a photo", undefined, [
+      { text: "Take photo", onPress: () => resolve("camera") },
+      { text: "Choose from library", onPress: () => resolve("library") },
+      { text: "Cancel", style: "cancel", onPress: () => resolve(null) },
+    ], { cancelable: true, onDismiss: () => resolve(null) })
+  );
+  if (!choice) return null;
+  const options: ImagePicker.ImagePickerOptions = {
+    mediaTypes: ["images"],
+    quality: 0.7,
+    allowsEditing: !!opts?.square,
+    aspect: opts?.square ? [1, 1] : undefined,
+    base64: true, // read the photo straight from the picker, no file reading needed
+  };
+  let res: ImagePicker.ImagePickerResult;
+  if (choice === "camera") {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert("Camera access needed", "Allow camera access in your phone's settings to take a photo.");
+      return null;
+    }
+    res = await ImagePicker.launchCameraAsync(options);
+  } else {
+    res = await ImagePicker.launchImageLibraryAsync(options);
+  }
+  const a = res.canceled ? null : res.assets?.[0];
+  return a ? { uri: a.uri, mime: a.mimeType ?? "image/jpeg", b64: a.base64 ?? undefined } : null;
+}
+
+// Picks a PDF file (used for the driver's licence)
+async function pickPdf(): Promise<Picked | null> {
+  const res = await DocumentPicker.getDocumentAsync({ type: "application/pdf", copyToCacheDirectory: true });
+  const a = res.canceled ? null : res.assets?.[0];
+  if (!a) return null;
+  if (a.size && a.size > 10 * 1024 * 1024) {
+    Alert.alert("File too large", "Choose a PDF smaller than 10 MB.");
+    return null;
+  }
+  return { uri: a.uri, mime: "application/pdf", name: a.name };
+}
+
+// The licence can be a photo or a PDF
+async function pickLicenseFile(): Promise<Picked | null> {
+  const kind = await new Promise<"photo" | "pdf" | null>((resolve) =>
+    Alert.alert("Driver's licence", "Upload a photo or a PDF.", [
+      { text: "Photo", onPress: () => resolve("photo") },
+      { text: "PDF file", onPress: () => resolve("pdf") },
+      { text: "Cancel", style: "cancel", onPress: () => resolve(null) },
+    ], { cancelable: true, onDismiss: () => resolve(null) })
+  );
+  if (kind === "photo") return pickPhoto();
+  if (kind === "pdf") return pickPdf();
+  return null;
+}
+
+const B64_TABLE: Record<string, number> = {};
+"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".split("").forEach((ch, i) => { B64_TABLE[ch] = i; });
+function b64ToBytes(b64: string): Uint8Array {
+  const clean = b64.replace(/[^A-Za-z0-9+/]/g, "");
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let o = 0;
+  for (let i = 0; i < clean.length; i += 4) {
+    const n = (B64_TABLE[clean[i]] << 18) | (B64_TABLE[clean[i + 1]] << 12) | ((B64_TABLE[clean[i + 2]] ?? 0) << 6) | (B64_TABLE[clean[i + 3]] ?? 0);
+    if (o < out.length) out[o++] = (n >> 16) & 255;
+    if (o < out.length) out[o++] = (n >> 8) & 255;
+    if (o < out.length) out[o++] = n & 255;
+  }
+  return out;
+}
+
+// Reads a local file (used for PDFs). XHR works on file:// links where fetch may not.
+function readFileBytes(uri: string): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.onload = () => resolve(xhr.response as ArrayBuffer);
+    xhr.onerror = () => reject(new Error("the phone could not open the file"));
+    xhr.responseType = "arraybuffer";
+    xhr.open("GET", uri);
+    xhr.send();
+  });
+}
+
+async function uploadPhoto(bucket: string, path: string, pic: Picked, upsert = false) {
+  let body: Uint8Array | ArrayBuffer;
+  try {
+    body = pic.b64 ? b64ToBytes(pic.b64) : await readFileBytes(pic.uri);
+  } catch (e: any) {
+    throw new Error(`Could not read the file: ${e?.message ?? "unknown error"}`);
+  }
+  if (body.byteLength === 0) throw new Error("Could not read the file. Try a different one.");
+  try {
+    const { error } = await supabase.storage.from(bucket).upload(path, body, { contentType: pic.mime, upsert });
+    if (error) throw new Error(error.message);
+  } catch (e: any) {
+    throw new Error(`Upload failed: ${e?.message ?? "unknown error"}. Check your internet connection.`);
+  }
+}
+
 // "082 123 4567" -> "+27821234567" (South African numbers by default)
 const normalizePhone = (raw: string) => {
   const d = raw.replace(/[^\d+]/g, "");
@@ -481,7 +619,7 @@ const normalizePhone = (raw: string) => {
 // Log in with email + password. New accounts confirm their email and phone with one-time codes.
 function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: boolean; onClose: () => void; initialMode?: "signin" | "signup" }) {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [step, setStep] = useState<"form" | "email-code" | "phone-code">("form");
+  const [step, setStep] = useState<"form" | "email-code">("form");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
@@ -542,11 +680,11 @@ function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: bool
     setBusy(false);
     if (error) return setError(error.message);
     if (data.user && data.user.identities?.length === 0) return setError("An account with this email already exists. Log in instead.");
-    if (data.session) return startPhoneVerification(); // email confirmation is switched off in Supabase
+    if (data.session) return onClose(); // email confirmation is switched off in Supabase
     setCode(""); setStep("email-code"); setCooldown(60);
   };
 
-  // Step 1 for new accounts: prove the email is theirs
+  // New accounts prove the email is theirs with a one-time code (the phone number is saved but not verified by SMS)
   const verifyEmail = async () => {
     setError("");
     if (code.trim().length < 6) return setError("Enter the code we sent you");
@@ -554,87 +692,129 @@ function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: bool
     const { error } = await supabase.auth.verifyOtp({ email: email.trim(), token: code.trim(), type: "email" });
     setBusy(false);
     if (error) return setError(error.message);
-    if (normalizePhone(phone)) return startPhoneVerification();
     onClose();
   };
 
-  // Step 2: prove the phone number is theirs (SMS code)
-  const startPhoneVerification = async () => {
-    const { error } = await supabase.auth.updateUser({ phone: normalizePhone(phone)! });
-    if (error) {
-      Alert.alert("Phone not verified", `${error.message}\n\nYour email is verified, but your phone number is not.`);
-      return onClose();
-    }
-    setError(""); setCode(""); setStep("phone-code"); setCooldown(60);
-  };
-
-  const verifyPhone = async () => {
-    setError("");
-    if (code.trim().length < 6) return setError("Enter the code we sent you");
-    setBusy(true);
-    const { error } = await supabase.auth.verifyOtp({ phone: normalizePhone(phone)!, token: code.trim(), type: "phone_change" });
-    setBusy(false);
-    if (error) return setError(error.message);
-    onClose();
-  };
-
-  const title = step === "email-code" ? "Verify your email" : step === "phone-code" ? "Verify your phone" : mode === "signin" ? "Log in" : "Create account";
-  const action = step === "form" ? (mode === "signin" ? signIn : signUp) : step === "email-code" ? verifyEmail : verifyPhone;
+  const title = step === "email-code" ? "Verify your email" : mode === "signin" ? "Log in" : "Create account";
+  const action = step === "form" ? (mode === "signin" ? signIn : signUp) : verifyEmail;
   const actionLabel = step === "form" ? (mode === "signin" ? "Log in" : "Create account") : "Verify";
-  const resend = step === "email-code" ? sendEmailCode : startPhoneVerification;
+  const resend = sendEmailCode;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-        <View style={[s.card, { borderRadius: 24, padding: 24 }]}>
-          <View style={[s.row, { justifyContent: "space-between", marginBottom: 16 }]}>
-            <T style={{ fontWeight: "600", fontSize: 18 }}>{title}</T>
-            <Pressable onPress={onClose}><X size={18} color={C.muted} /></Pressable>
-          </View>
-
-          {step === "form" ? (
-            <>
-              {mode === "signup" && <Field label="Full name" value={name} onChangeText={setName} />}
-              <Field label="Email" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
-              {mode === "signup" && <Field label="Phone number" value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="082 123 4567" />}
-              <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
-            </>
-          ) : (
-            <>
-              <T style={[s.muted, { fontSize: 14, lineHeight: 20, marginBottom: 16 }]}>
-                {step === "email-code"
-                  ? `We sent a code to ${email.trim()}. Enter it to confirm this email is yours.`
-                  : `We sent an SMS to ${normalizePhone(phone)}. Enter the code to confirm this number is yours.`}
-              </T>
-              <Field label="Code" value={code} onChangeText={setCode} keyboardType="number-pad" maxLength={10} autoFocus />
-            </>
-          )}
-
-          {!!error && <T style={{ color: C.danger, fontSize: 12, marginBottom: 12 }}>{error}</T>}
-
-          <Pressable onPress={action} disabled={busy} style={[s.primaryBtn, busy && { opacity: 0.6 }]}>
-            <T style={s.primaryTxt}>{busy ? "Please wait..." : actionLabel}</T>
-          </Pressable>
-
-          {step !== "form" && (
-            <View style={[s.row, { justifyContent: "space-between", marginTop: 16 }]}>
-              {step === "email-code" ? (
-                <Pressable onPress={() => { setStep("form"); setError(""); }}><T style={{ color: C.muted }}>Back</T></Pressable>
-              ) : (
-                <Pressable onPress={onClose}><T style={{ color: C.muted }}>Skip for now</T></Pressable>
-              )}
-              <Pressable onPress={resend} disabled={cooldown > 0 || busy}>
-                <T style={{ color: cooldown > 0 ? C.muted : C.primary }}>{cooldown > 0 ? `Resend in ${cooldown}s` : "Resend code"}</T>
-              </Pressable>
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+        <View style={[s.card, { borderRadius: 24, maxHeight: "90%" }]}>
+          <ScrollView
+            contentContainerStyle={{ padding: 24 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            <View style={[s.row, { justifyContent: "space-between", marginBottom: 16 }]}>
+              <T style={{ fontWeight: "600", fontSize: 18 }}>{title}</T>
+              <Pressable onPress={onClose}><X size={18} color={C.muted} /></Pressable>
             </View>
-          )}
-          {step === "form" && (
-            <Pressable onPress={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); }} style={{ alignItems: "center", marginTop: 16 }}>
-              <T style={{ color: C.primary }}>{mode === "signin" ? "New here? Create an account" : "Already have an account? Log in"}</T>
+
+            {step === "form" ? (
+              <>
+                {mode === "signup" && <Field label="Full name" value={name} onChangeText={setName} />}
+                <Field label="Email" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
+                {mode === "signup" && <Field label="Phone number" value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="082 123 4567" />}
+                <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+              </>
+            ) : (
+              <>
+                <T style={[s.muted, { fontSize: 14, lineHeight: 20, marginBottom: 16 }]}>
+                  {`We sent a code to ${email.trim()}. Enter it to confirm this email is yours.`}
+                </T>
+                <Field label="Code" value={code} onChangeText={setCode} keyboardType="number-pad" maxLength={10} autoFocus />
+              </>
+            )}
+
+            {!!error && <T style={{ color: C.danger, fontSize: 12, marginBottom: 12 }}>{error}</T>}
+
+            <Pressable onPress={action} disabled={busy} style={[s.primaryBtn, busy && { opacity: 0.6 }]}>
+              <T style={s.primaryTxt}>{busy ? "Please wait..." : actionLabel}</T>
             </Pressable>
-          )}
+
+            {step !== "form" && (
+              <View style={[s.row, { justifyContent: "space-between", marginTop: 16 }]}>
+                <Pressable onPress={() => { setStep("form"); setError(""); }}><T style={{ color: C.muted }}>Back</T></Pressable>
+                <Pressable onPress={resend} disabled={cooldown > 0 || busy}>
+                  <T style={{ color: cooldown > 0 ? C.muted : C.primary }}>{cooldown > 0 ? `Resend in ${cooldown}s` : "Resend code"}</T>
+                </Pressable>
+              </View>
+            )}
+            {step === "form" && (
+              <Pressable onPress={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); }} style={{ alignItems: "center", marginTop: 16 }}>
+                <T style={{ color: C.primary }}>{mode === "signin" ? "New here? Create an account" : "Already have an account? Log in"}</T>
+              </Pressable>
+            )}
+          </ScrollView>
         </View>
       </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// Profile picture, falling back to the first letter if there is none or it can't load
+function Avatar({ uri, initial, size, style }: { uri?: string; initial: string; size: number; style?: any }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [uri]);
+  return (
+    <View style={[s.avatar, { width: size, height: size, borderRadius: size / 2, overflow: "hidden" }, style]}>
+      {uri && !failed
+        ? <Image source={{ uri }} style={{ width: size, height: size }} resizeMode="cover" onError={() => setFailed(true)} />
+        : <T style={{ color: C.primary, fontWeight: "600", fontSize: Math.round(size * 0.37) }}>{initial}</T>}
+    </View>
+  );
+}
+
+// Change password: checks the current password first, then saves the new one
+function ChangePasswordModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  const { user } = React.useContext(AuthCtx);
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [again, setAgain] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { if (visible) { setCurrent(""); setNext(""); setAgain(""); setError(""); setBusy(false); } }, [visible]);
+
+  const save = async () => {
+    setError("");
+    if (!user?.email) return setError("You need to be signed in.");
+    if (!current) return setError("Enter your current password");
+    if (next.length < 6) return setError("New password must be at least 6 characters");
+    if (next === current) return setError("Choose a password different from your current one");
+    if (next !== again) return setError("The new passwords don't match");
+    setBusy(true);
+    const check = await supabase.auth.signInWithPassword({ email: user.email, password: current });
+    if (check.error) { setBusy(false); return setError("Your current password is wrong"); }
+    const { error } = await supabase.auth.updateUser({ password: next });
+    setBusy(false);
+    if (error) return setError(error.message);
+    Alert.alert("Password changed", "Use your new password next time you log in.", [{ text: "OK", onPress: onClose }]);
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={[s.row, { padding: 16 }]}>
+            <Pressable onPress={onClose} style={s.roundBtn}><ChevronLeft size={18} color={C.fg} /></Pressable>
+            <T style={{ fontWeight: "600", fontSize: 18, marginLeft: 12 }}>Change password</T>
+          </View>
+          <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+            <Field label="Current password" value={current} onChangeText={setCurrent} secureTextEntry autoCapitalize="none" />
+            <Field label="New password" value={next} onChangeText={setNext} secureTextEntry autoCapitalize="none" />
+            <Field label="Confirm new password" value={again} onChangeText={setAgain} secureTextEntry autoCapitalize="none" />
+            {!!error && <T style={{ color: C.danger, fontSize: 12, marginBottom: 12 }}>{error}</T>}
+            <Pressable onPress={save} disabled={busy} style={[s.primaryBtn, busy && { opacity: 0.6 }]}>
+              <T style={s.primaryTxt}>{busy ? "Please wait..." : "Change password"}</T>
+            </Pressable>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
     </Modal>
   );
 }
@@ -648,6 +828,31 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [pwOpen, setPwOpen] = useState(false);
+
+  // Picks a photo, uploads it to the public "avatars" bucket and saves its link on the account
+  const changePhoto = async () => {
+    if (!user?.id) return;
+    const pic = await pickPhoto({ square: true });
+    if (!pic) return;
+    setPhotoBusy(true);
+    try {
+      const path = `${user.id}/avatar`;
+      await uploadPhoto("avatars", path, pic, true);
+      const url = `${supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl}?v=${Date.now()}`;
+      const { error } = await supabase.auth.updateUser({ data: { avatar_url: url } });
+      if (error) throw new Error(error.message);
+      const check = await fetch(url, { method: "HEAD" }).catch(() => null);
+      if (check && !check.ok) {
+        Alert.alert("Photo saved but can't be shown", "The avatars storage bucket is not public. In Supabase run setup_storage.sql again, or open Storage, then avatars, and make it public.");
+      }
+    } catch (e: any) {
+      Alert.alert("Could not update photo", e?.message ?? "Please try again.");
+    }
+    setPhotoBusy(false);
+  };
 
   const load = () => {
     const [f, ...rest] = (user?.name ?? "").split(" ");
@@ -682,10 +887,10 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
       { text: "Cancel", style: "cancel" },
       { text: "Delete", style: "destructive", onPress: confirmDelete },
     ]);
-  const soon = (what: string) => Alert.alert(what, "Coming soon");
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
       <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={[s.row, { padding: 16 }]}>
@@ -693,13 +898,11 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
             <T style={{ fontWeight: "600", fontSize: 18, marginLeft: 12 }}>Account info</T>
           </View>
           <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
-            <Pressable onPress={() => soon("Change photo")} style={{ alignItems: "center", marginBottom: 24 }}>
-              <View style={[s.avatar, { width: 88, height: 88, borderRadius: 44 }]}>
-                <T style={{ color: C.primary, fontWeight: "600", fontSize: 32 }}>{first[0]?.toUpperCase() ?? "?"}</T>
-              </View>
+            <Pressable onPress={changePhoto} disabled={photoBusy} style={{ alignItems: "center", marginBottom: 24 }}>
+              <Avatar uri={user?.avatar} initial={first[0]?.toUpperCase() ?? "?"} size={88} />
               <View style={[s.row, { marginTop: 8 }]}>
                 <Camera size={13} color={C.primary} />
-                <T style={{ color: C.primary, fontSize: 13, marginLeft: 6 }}>Change photo</T>
+                <T style={{ color: C.primary, fontSize: 13, marginLeft: 6 }}>{photoBusy ? "Uploading..." : "Change photo"}</T>
               </View>
             </Pressable>
 
@@ -735,7 +938,7 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
 
             <View style={{ height: 28 }} />
             <Label>Security</Label>
-            <Pressable onPress={() => soon("Change password")} style={[s.card, s.row]}>
+            <Pressable onPress={() => setPwOpen(true)} style={[s.card, s.row]}>
               <Lock size={16} color={C.muted} />
               <T style={{ flex: 1, marginLeft: 12, fontWeight: "500" }}>Change password</T>
               <ChevronRight size={15} color={C.muted} />
@@ -747,6 +950,7 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
             </Pressable>
           </ScrollView>
         </KeyboardAvoidingView>
+        <ChangePasswordModal visible={pwOpen} onClose={() => setPwOpen(false)} />
       </SafeAreaView>
     </Modal>
   );
@@ -763,12 +967,82 @@ const SettingRow = ({ title, sub, children }: { title: string; sub?: string; chi
   </View>
 );
 
+// Pick how you pay. compact = a single row of chips (used inside the trip sheet)
+function PaymentOptions({ value, onChange, compact }: { value: PayMethod; onChange: (m: PayMethod) => void; compact?: boolean }) {
+  if (compact) {
+    return (
+      <View style={[s.row, { gap: 8 }]}>
+        {PAYMENT_METHODS.map((m) => {
+          const on = value === m.id;
+          const Icon = m.icon;
+          return (
+            <Pressable key={m.id} disabled={!m.available} onPress={() => onChange(m.id)}
+              style={[s.dateChip, { flex: 1, alignItems: "center", paddingVertical: 10 }, on && s.dateChipOn, !m.available && { opacity: 0.4 }]}>
+              <Icon size={16} color={on ? "#fff" : C.muted} />
+              <T style={[s.dateTxt, { marginTop: 4 }, on && { color: "#fff" }]}>{m.short}</T>
+            </Pressable>
+          );
+        })}
+      </View>
+    );
+  }
+  return (
+    <View style={{ gap: 8 }}>
+      {PAYMENT_METHODS.map((m) => {
+        const on = value === m.id;
+        const Icon = m.icon;
+        return (
+          <Pressable key={m.id} disabled={!m.available} onPress={() => onChange(m.id)}
+            style={[s.card, s.row, { padding: 14 }, on && { borderColor: C.primary }, !m.available && { opacity: 0.55 }]}>
+            <View style={s.menuIcon}><Icon size={16} color={on ? C.primary : C.muted} /></View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <T style={{ fontWeight: "500" }}>{m.label}</T>
+              <T style={[s.muted, { fontSize: 12, marginTop: 2 }]}>{m.available ? m.sub : "Coming soon"}</T>
+            </View>
+            {on && <CheckCircle size={18} color={C.primary} />}
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+function PaymentModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  const { settings, update } = React.useContext(SettingsCtx);
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
+        <View style={[s.row, { padding: 16 }]}>
+          <Pressable onPress={onClose} style={s.roundBtn}><ChevronLeft size={18} color={C.fg} /></Pressable>
+          <T style={{ fontWeight: "600", fontSize: 18, marginLeft: 12 }}>Payment methods</T>
+        </View>
+        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+          <Label>Default payment method</Label>
+          <PaymentOptions value={settings.payment} onChange={(m) => update({ payment: m })} />
+          <T style={[s.muted, { marginTop: 16, lineHeight: 18 }]}>
+            Cash means you pay the driver directly when you travel. Card and Instant EFT are coming soon. You can choose a different method each time you request a seat.
+          </T>
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const { isDriver, openDriver } = React.useContext(AuthCtx);
   const { settings, update } = React.useContext(SettingsCtx);
   const track = { false: C.track, true: C.primary };
+
+  const confirmThemeChange = (newTheme: "system" | "light" | "dark") => {
+    KEEP_SETTINGS_OPEN = true;
+    setTimeout(() => { KEEP_SETTINGS_OPEN = false; }, 1500);
+    update({ theme: newTheme });
+  };
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
       <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
         <View style={[s.row, { padding: 16 }]}>
           <Pressable onPress={onClose} style={s.roundBtn}><ChevronLeft size={18} color={C.fg} /></Pressable>
@@ -780,7 +1054,7 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
             {([["system", "System", Smartphone], ["light", "Light", Sun], ["dark", "Dark", Moon]] as const).map(([id, name, Icon]) => {
               const on = settings.theme === id;
               return (
-                <Pressable key={id} onPress={() => update({ theme: id })} style={[s.dateChip, { flex: 1, alignItems: "center", paddingVertical: 12 }, on && s.dateChipOn]}>
+                <Pressable key={id} onPress={() => confirmThemeChange(id)} style={[s.dateChip, { flex: 1, alignItems: "center", paddingVertical: 12 }, on && s.dateChipOn]}>
                   <Icon size={18} color={on ? "#fff" : C.muted} />
                   <T style={[s.dateTxt, { marginTop: 6 }, on && { color: "#fff" }]}>{name}</T>
                 </Pressable>
@@ -969,6 +1243,7 @@ function InfoModal({ kind, onClose }: { kind: string | null; onClose: () => void
 
   return (
     <Modal visible={!!kind} animationType="slide" onRequestClose={onClose}>
+      <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
       <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
         <View style={[s.row, { padding: 16 }]}>
           <Pressable onPress={onClose} style={s.roundBtn}><ChevronLeft size={18} color={C.fg} /></Pressable>
@@ -982,7 +1257,7 @@ function InfoModal({ kind, onClose }: { kind: string | null; onClose: () => void
 
 // ---------- Driver side ----------
 type DriverProfile = { id: string; full_name: string; phone: string; vehicle: string; plate: string; car_seats: number; rating: number; trips: number };
-type TripBooking = { id: string; rider_name: string; rider_phone: string | null; seats: number; status: "pending" | "accepted" | "declined" | "cancelled" };
+type TripBooking = { id: string; rider_name: string; rider_phone: string | null; seats: number; payment_method?: string | null; status: "pending" | "accepted" | "declined" | "cancelled" };
 type MyTrip = {
   id: string; origin: string; destination: string; depart_at: string; price: number | null; seats_total: number;
   notes: string | null; status: "open" | "cancelled" | "completed"; bookings: TripBooking[];
@@ -1008,6 +1283,136 @@ function TownInput({ label, value, onChange, exclude }: { label: string; value: 
   );
 }
 
+// ---------- Driver documents: submit once, then locked ----------
+type DriverDocs = { license_path: string; car_photo_path: string; status: "pending" | "approved" | "rejected"; submitted_at: string };
+const DOC_STATUS = {
+  pending: { label: "Under review", pill: "Waiting for driver" },
+  approved: { label: "Approved", pill: "Confirmed" },
+  rejected: { label: "Rejected", pill: "Declined" },
+} as const;
+
+const PhotoSlot = ({ label, pic, url, pdf, hint, onPress }: { label: string; pic?: Picked | null; url?: string; pdf?: boolean; hint?: string; onPress?: () => void }) => {
+  const isPdf = pdf || pic?.mime === "application/pdf";
+  return (
+    <Pressable onPress={onPress} disabled={!onPress} style={{ flex: 1 }}>
+      <T style={[s.muted, { marginBottom: 6 }]}>{label}</T>
+      <View style={[s.card, { height: 110, padding: 0, alignItems: "center", justifyContent: "center", overflow: "hidden" }]}>
+        {isPdf ? (
+          <>
+            <FileText size={26} color={C.primary} />
+            <T style={[s.muted, { marginTop: 6, paddingHorizontal: 8, textAlign: "center" }]} numberOfLines={2}>{pic?.name ?? "PDF document"}</T>
+            {!pic && !!url && <T style={{ fontSize: 12, color: C.primary, marginTop: 4 }}>Tap to open</T>}
+          </>
+        ) : pic || url ? (
+          <Image source={{ uri: pic?.uri ?? url }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+        ) : (
+          <>
+            <Camera size={20} color={C.muted} />
+            <T style={[s.muted, { marginTop: 6, textAlign: "center" }]}>{hint ?? "Tap to add"}</T>
+          </>
+        )}
+      </View>
+    </Pressable>
+  );
+};
+
+// The driver's licence and a photo of the car. Once submitted they can't be changed or replaced
+// (the database only allows an insert, see setup_storage.sql).
+function DriverDocuments({ driverId }: { driverId: string }) {
+  const [docs, setDocs] = useState<DriverDocs | null>(null);
+  const [urls, setUrls] = useState<{ license?: string; car?: string }>({});
+  const [loading, setLoading] = useState(true);
+  const [license, setLicense] = useState<Picked | null>(null);
+  const [car, setCar] = useState<Picked | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    const { data, error } = await supabase
+      .from("driver_documents").select("license_path, car_photo_path, status, submitted_at").eq("driver_id", driverId).maybeSingle();
+    if (error) { setError(error.message); setLoading(false); return; }
+    setDocs(data as DriverDocs | null);
+    if (data) {
+      const [l, c] = await Promise.all([
+        supabase.storage.from("driver-docs").createSignedUrl(data.license_path, 3600),
+        supabase.storage.from("driver-docs").createSignedUrl(data.car_photo_path, 3600),
+      ]);
+      setUrls({ license: l.data?.signedUrl, car: c.data?.signedUrl });
+    }
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, [driverId]);
+
+  const send = async () => {
+    if (!license || !car) return;
+    setBusy(true); setError("");
+    try {
+      const stamp = Date.now();
+      const lp = `${driverId}/license-${stamp}.${extOf(license.mime)}`;
+      const cp = `${driverId}/car-${stamp}.${extOf(car.mime)}`;
+      await uploadPhoto("driver-docs", lp, license);
+      await uploadPhoto("driver-docs", cp, car);
+      try { await uploadPhoto("car-photos", cp, car); } catch { /* the app copies it across later if this fails */ }
+      const { error } = await supabase.from("driver_documents").insert({ driver_id: driverId, license_path: lp, car_photo_path: cp });
+      if (error) throw new Error(error.message);
+      await load();
+    } catch (e: any) {
+      setError(e?.message ?? "Could not submit your documents. Try again.");
+    }
+    setBusy(false);
+  };
+
+  const submit = () =>
+    Alert.alert("Submit documents?", "You can't change or replace them after you submit. Check that both photos are clear and readable.", [
+      { text: "Go back", style: "cancel" },
+      { text: "Submit", onPress: send },
+    ]);
+
+  const pick = (set: (p: Picked) => void) => async () => { const p = await pickPhoto(); if (p) set(p); };
+
+  return (
+    <View>
+      <Label>Verification documents</Label>
+      {loading ? (
+        <T style={s.muted}>Loading...</T>
+      ) : docs ? (
+        <View style={s.card}>
+          <View style={[s.row, { justifyContent: "space-between", marginBottom: 12 }]}>
+            <View style={s.row}>
+              <Lock size={14} color={C.muted} />
+              <T style={[s.muted, { marginLeft: 8 }]}>Submitted {fmtWhen(docs.submitted_at)}</T>
+            </View>
+            <T style={[s.booked, pillStyle(DOC_STATUS[docs.status].pill)]}>{DOC_STATUS[docs.status].label}</T>
+          </View>
+          <View style={{ flexDirection: "row", gap: 12 }}>
+            <PhotoSlot label="Driver's licence" url={urls.license} pdf={docs.license_path.endsWith(".pdf")}
+              onPress={docs.license_path.endsWith(".pdf") && urls.license ? () => Linking.openURL(urls.license!) : undefined} />
+            <PhotoSlot label="Car photo" url={urls.car} />
+          </View>
+          <T style={[s.muted, { marginTop: 12, lineHeight: 17 }]}>
+            Submitted documents can't be changed. {docs.status === "rejected" ? "Email" : "If something is wrong, email"} {SUPPORT_EMAIL}.
+          </T>
+        </View>
+      ) : (
+        <>
+          <T style={[s.muted, { fontSize: 13, lineHeight: 19, marginBottom: 12 }]}>
+            Upload a photo or PDF of your driver's licence and a clear photo of your car. You can only submit once, and they can't be changed afterwards.
+          </T>
+          <View style={{ flexDirection: "row", gap: 12, marginBottom: 12 }}>
+            <PhotoSlot label="Driver's licence" pic={license} hint="Tap to add photo or PDF" onPress={async () => { const p = await pickLicenseFile(); if (p) setLicense(p); }} />
+            <PhotoSlot label="Car photo" pic={car} onPress={pick(setCar)} />
+          </View>
+          {!!error && <T style={{ color: C.danger, fontSize: 12, marginBottom: 12 }}>{error}</T>}
+          <Pressable onPress={submit} disabled={busy || !license || !car} style={[s.primaryBtn, (busy || !license || !car) && { opacity: 0.5 }]}>
+            <T style={s.primaryTxt}>{busy ? "Uploading..." : "Submit documents"}</T>
+          </Pressable>
+        </>
+      )}
+      {loading || !docs ? null : !!error && <T style={{ color: C.danger, fontSize: 12, marginTop: 8 }}>{error}</T>}
+    </View>
+  );
+}
+
 // Become a driver / edit your details (opened from Account). There is no price here: MzansiLift sets every fare.
 function DriverProfileModal({ visible, onClose, onRegistered }: { visible: boolean; onClose: () => void; onRegistered: () => void }) {
   const { user } = React.useContext(AuthCtx);
@@ -1020,7 +1425,6 @@ function DriverProfileModal({ visible, onClose, onRegistered }: { visible: boole
   const [carSeats, setCarSeats] = useState(3);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [saved, setSaved] = useState(false);
 
   const fill = (r: DriverProfile | null) => {
     setName(r?.full_name ?? user?.name ?? "");
@@ -1029,7 +1433,7 @@ function DriverProfileModal({ visible, onClose, onRegistered }: { visible: boole
   };
 
   const load = async () => {
-    setLoading(true); setError(""); setSaved(false);
+    setLoading(true); setError("");
     const { data: auth } = await supabase.auth.getUser();
     if (auth.user) {
       const { data, error } = await supabase.from("drivers").select(DRIVER_COLS).eq("id", auth.user.id).maybeSingle();
@@ -1041,7 +1445,8 @@ function DriverProfileModal({ visible, onClose, onRegistered }: { visible: boole
   };
   useEffect(() => { if (visible && user) load(); }, [visible]);
 
-  const edit = (setter: (t: string) => void) => (t: string) => { setter(t); setSaved(false); };
+  const edit = (setter: (t: string) => void) => setter;
+  const locked = !!row; // details can't be changed once the driver has registered
 
   const validate = () => {
     if (!name.trim() || !phone.trim() || !vehicle.trim() || !plate.trim()) {
@@ -1051,7 +1456,17 @@ function DriverProfileModal({ visible, onClose, onRegistered }: { visible: boole
     return { full_name: name.trim(), phone: phone.trim(), vehicle: vehicle.trim(), plate: plate.trim().toUpperCase(), car_seats: carSeats };
   };
 
-  const register = async () => {
+  // Asks the driver to double-check, because registered details can't be edited
+  const register = () => {
+    setError("");
+    if (!validate()) return;
+    Alert.alert("Confirm your details", "Your name, phone, vehicle, number plate and seats can't be changed after you register. Check that they are correct.", [
+      { text: "Go back", style: "cancel" },
+      { text: "Register", onPress: doRegister },
+    ]);
+  };
+
+  const doRegister = async () => {
     setError("");
     const v = validate();
     const { data: auth } = await supabase.auth.getUser();
@@ -1064,28 +1479,16 @@ function DriverProfileModal({ visible, onClose, onRegistered }: { visible: boole
     onRegistered();
   };
 
-  const saveEdits = async () => {
-    setError("");
-    const v = validate();
-    if (!v || !row) return;
-    setBusy(true);
-    const { error } = await supabase.from("drivers").update(v).eq("id", row.id);
-    setBusy(false);
-    if (error) return setError(error.message);
-    setRow({ ...row, ...v });
-    setSaved(true);
-  };
-
   const form = (
     <>
-      <Field label="Full name" value={name} onChangeText={edit(setName)} />
-      <Field label="Phone number (riders see it once you accept them)" value={phone} onChangeText={edit(setPhone)} keyboardType="phone-pad" />
-      <Field label="Vehicle (e.g. Toyota Corolla)" value={vehicle} onChangeText={edit(setVehicle)} />
-      <Field label="Number plate" value={plate} onChangeText={edit(setPlate)} autoCapitalize="characters" />
+      <Field label="Full name" value={name} onChangeText={edit(setName)} editable={!locked} />
+      <Field label="Phone number (riders see it once you accept them)" value={phone} onChangeText={edit(setPhone)} keyboardType="phone-pad" editable={!locked} />
+      <Field label="Vehicle (e.g. Toyota Corolla)" value={vehicle} onChangeText={edit(setVehicle)} editable={!locked} />
+      <Field label="Number plate" value={plate} onChangeText={edit(setPlate)} autoCapitalize="characters" editable={!locked} />
       <T style={[s.muted, { marginBottom: 8 }]}>Passenger seats in your car (max 3)</T>
       <View style={[s.row, { gap: 8, marginBottom: 16 }]}>
         {[1, 2, 3].map((n) => (
-          <Pressable key={n} onPress={() => { setCarSeats(n); setSaved(false); }} style={[s.dateChip, carSeats === n && s.dateChipOn]}>
+          <Pressable key={n} disabled={locked} onPress={() => setCarSeats(n)} style={[s.dateChip, carSeats === n && s.dateChipOn, locked && carSeats !== n && { opacity: 0.4 }]}>
             <T style={[s.dateTxt, carSeats === n && { color: "#fff" }]}>{plural(n, "seat")}</T>
           </Pressable>
         ))}
@@ -1095,6 +1498,7 @@ function DriverProfileModal({ visible, onClose, onRegistered }: { visible: boole
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
       <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={[s.row, { padding: 16 }]}>
@@ -1120,10 +1524,14 @@ function DriverProfileModal({ visible, onClose, onRegistered }: { visible: boole
               <>
                 {form}
                 {!!error && <T style={{ color: C.danger, fontSize: 12, marginBottom: 12 }}>{error}</T>}
-                <Pressable onPress={saveEdits} disabled={busy} style={[s.primaryBtn, busy && { opacity: 0.6 }]}>
-                  <T style={s.primaryTxt}>{busy ? "Please wait..." : "Save changes"}</T>
-                </Pressable>
-                {saved && <T style={{ color: C.green, textAlign: "center", marginTop: 10, fontSize: 13 }}>Saved</T>}
+                <View style={s.row}>
+                  <Lock size={13} color={C.muted} />
+                  <T style={[s.muted, { flex: 1, marginLeft: 8, lineHeight: 17 }]}>
+                    Your details are locked and can't be changed. To correct a mistake, email {SUPPORT_EMAIL}.
+                  </T>
+                </View>
+                <View style={{ height: 28 }} />
+                <DriverDocuments driverId={row.id} />
               </>
             )}
           </ScrollView>
@@ -1142,6 +1550,7 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [view, setView] = useState<"home" | "post">("home");
+  const [docStatus, setDocStatus] = useState<"none" | "pending" | "approved" | "rejected" | null>(null); // null = still checking
 
   // "Post a trip" form
   const [origin, setOrigin] = useState("");
@@ -1161,12 +1570,15 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
     const { data: auth } = await supabase.auth.getUser();
     const id = auth.user?.id;
     if (!id) return;
-    const [p, t, r] = await Promise.all([
+    const [p, t, r, dd] = await Promise.all([
       supabase.from("drivers").select(DRIVER_COLS).eq("id", id).maybeSingle(),
       supabase.from("trips").select("*, bookings(*)").eq("driver_id", id).order("depart_at", { ascending: true }),
       supabase.from("trip_requests").select("id, origin, destination, travel_date, seats, rider_name")
         .eq("status", "open").neq("rider_id", id).order("created_at", { ascending: false }).limit(10),
+      supabase.from("driver_documents").select("status, car_photo_path").eq("driver_id", id).maybeSingle(),
     ]);
+    if (!dd.error) setDocStatus(dd.data ? (dd.data.status as "pending" | "approved" | "rejected") : "none");
+    if (dd.data?.car_photo_path) healCarPhoto(dd.data.car_photo_path);
     if (p.error) return setError(p.error.message);
     if (t.error) return setError(t.error.message);
     setError("");
@@ -1202,7 +1614,15 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
 
   const refresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
+  const approved = docStatus === "approved";
+  const notApprovedMsg = docStatus === "pending" ? "Your documents are still under review. You can post trips once they are approved."
+    : docStatus === "rejected" ? `Your documents were rejected, so you can't post trips. Email ${SUPPORT_EMAIL} for help.`
+    : docStatus === "none" ? "Submit your driver's licence and car photo (Account → Be a driver). You can post trips once they are approved."
+    : "Checking your approval status. Try again in a moment.";
+
   const openPost = (req?: TripRequest) => {
+    if (!approved) return Alert.alert("Approval needed", notApprovedMsg);
+    if (hasOpenTrip) return Alert.alert(ONE_TRIP_TITLE, ONE_TRIP_MSG);
     setOrigin(req?.origin ?? ""); setDestination(req?.destination ?? "");
     let d: Date | null = null;
     if (req?.travel_date) {
@@ -1217,6 +1637,8 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
 
   const postTrip = async () => {
     setFormError("");
+    if (!approved) return setFormError(notApprovedMsg);
+    if (hasOpenTrip) return setFormError(ONE_TRIP_MSG);
     const o = canon(origin), d = canon(destination);
     const t = parseTime(time);
     if (!o || !d) return setFormError("Enter where you're leaving from and where you're going.");
@@ -1268,6 +1690,7 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
   };
 
   const openTrips = trips.filter((t) => t.status === "open");
+  const hasOpenTrip = openTrips.length > 0; // one trip at a time: finish or cancel it before posting another
   const pastTrips = trips.filter((t) => t.status !== "open").reverse().slice(0, 10);
   const pending = openTrips.reduce((n, t) => n + t.bookings.filter((b) => b.status === "pending").length, 0);
 
@@ -1344,7 +1767,7 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                 <T mono style={[s.muted, { marginTop: 2 }]}>{profile.plate} · {plural(profile.car_seats, "seat")}</T>
               </View>
               <Pressable onPress={onEditProfile} style={[s.cancelPill, { borderColor: C.border }]}>
-                <T style={{ fontSize: 12, color: C.muted }}>Edit</T>
+                <T style={{ fontSize: 12, color: C.muted }}>Details</T>
               </Pressable>
             </View>
             <View style={s.statsRow}>
@@ -1367,10 +1790,21 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
           )}
           {!!error && <T style={{ color: C.danger, fontSize: 12, marginBottom: 12 }}>{error}</T>}
 
-          <Pressable onPress={() => openPost()} style={[s.primaryBtn, { flexDirection: "row", marginBottom: 24 }]}>
+          {!approved && (
+            <View style={[s.row, s.notice, { marginTop: 0, marginBottom: 16, borderColor: "rgba(245,158,11,0.35)", alignItems: "flex-start" }]}>
+              <AlertCircle size={16} color={C.amber} style={{ marginTop: 2 }} />
+              <T style={{ flex: 1, marginLeft: 12, lineHeight: 19 }}>{notApprovedMsg}</T>
+            </View>
+          )}
+          <Pressable onPress={() => openPost()} style={[s.primaryBtn, { flexDirection: "row", marginBottom: hasOpenTrip ? 8 : 24 }, (hasOpenTrip || !approved) && { opacity: 0.45 }]}>
             <Plus size={16} color="#fff" />
             <T style={[s.primaryTxt, { marginLeft: 8 }]}>Post a trip</T>
           </Pressable>
+          {hasOpenTrip && (
+            <T style={[s.muted, { fontSize: 12, lineHeight: 17, marginBottom: 24 }]}>
+              You have a trip open. Mark it completed (or cancel it) to post another.
+            </T>
+          )}
 
           {requests.length > 0 && (
             <>
@@ -1381,7 +1815,7 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                     <T style={{ fontWeight: "500" }} numberOfLines={1}>{r.origin || "Anywhere"} → {r.destination}</T>
                     <T style={s.muted}>{requestWhen(r)} · {plural(r.seats, "seat")}</T>
                   </View>
-                  <Pressable onPress={() => openPost(r)} style={[s.cancelPill, { borderColor: "rgba(37,99,235,0.4)" }]}>
+                  <Pressable onPress={() => openPost(r)} style={[s.cancelPill, { borderColor: "rgba(37,99,235,0.4)" }, (hasOpenTrip || !approved) && { opacity: 0.4 }]}>
                     <T style={{ fontSize: 12, color: C.primary }}>Post trip</T>
                   </Pressable>
                 </View>
@@ -1426,7 +1860,7 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                       <View style={{ flex: 1, paddingRight: 8 }}>
                         <T style={{ fontWeight: "500" }} numberOfLines={1}>{b.rider_name}</T>
                         <T style={s.muted}>
-                          {plural(b.seats, "seat")}{b.status === "accepted" && b.rider_phone ? ` · ${b.rider_phone}` : ""}
+                          {plural(b.seats, "seat")} · {payName(b.payment_method)}{b.status === "accepted" && b.rider_phone ? ` · ${b.rider_phone}` : ""}
                         </T>
                       </View>
                       {b.status === "pending" ? (
@@ -1487,12 +1921,12 @@ function WelcomeScreen({ onLogin, onSignup, onGuest }: { onLogin: () => void; on
     <View style={{ flex: 1, padding: 24 }}>
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
         <Image
-          source={require("../../assets/mzansilift-logo.png")}
+          source={THEME === "dark" ? LOGO_DARK : LOGO_LIGHT}
           style={{ width: 150, height: 150 }}
           resizeMode="contain"
         />
 
-        <T style={[s.muted, { fontSize: 14, marginTop: 8 }]}> rides, door to door</T>
+        <T style={[s.muted, { fontSize: 14, marginTop: 8 }]}> ride sharing platform, door to door</T>
       </View>
       <View style={{ gap: 12, paddingBottom: 16 }}>
         <Pressable onPress={onSignup} style={s.primaryBtn}>
@@ -1517,7 +1951,55 @@ type OpenTrip = {
   id: string; driver_id: string; driver_name: string; vehicle: string; plate: string;
   rating: number; driver_trips: number; origin: string; destination: string;
   depart_at: string; price: number; seats_total: number; seats_left: number; notes: string | null;
+  car_photo_path?: string | null; car_photo_url?: string | null; // car photo of an approved driver
 };
+
+// A driver's profile photo lives in the public "avatars" bucket at <id>/avatar (the Avatar component shows initials if there isn't one)
+const driverAvatarUrl = (id: string) => supabase.storage.from("avatars").getPublicUrl(`${id}/avatar`).data.publicUrl;
+
+// Car photos for riders live in their own PUBLIC bucket "car-photos", separate from the private "driver-docs" bucket that holds licences.
+// Which car photo belongs to which APPROVED driver (separate view, so the main trips list never depends on it)
+const carPathCache: Record<string, string | null> = {};
+async function loadCarPaths(driverIds: string[]) {
+  const need = driverIds.filter((id) => !(id in carPathCache));
+  if (!need.length) return;
+  try {
+    const { data, error } = await supabase.from("approved_car_photos").select("driver_id, car_photo_path").in("driver_id", need);
+    if (error) return;
+    need.forEach((id) => { carPathCache[id] = null; });
+    (data ?? []).forEach((r: any) => { carPathCache[r.driver_id] = r.car_photo_path; });
+  } catch { /* photos are optional, the list still works without them */ }
+}
+const carPhotoUrl = (path?: string | null) => (path ? supabase.storage.from("car-photos").getPublicUrl(path).data.publicUrl : null);
+
+// Drivers who submitted before the public bucket existed: copy their car photo across once (the driver's own phone does it).
+const carHealed = new Set<string>();
+async function healCarPhoto(path: string) {
+  if (carHealed.has(path)) return;
+  carHealed.add(path);
+  try {
+    const url = carPhotoUrl(path)!;
+    const head = await fetch(url, { method: "HEAD" });
+    if (head.ok) return;
+    const { data } = await supabase.storage.from("driver-docs").createSignedUrl(path, 120);
+    if (!data?.signedUrl) return;
+    const bytes = await (await fetch(data.signedUrl)).arrayBuffer();
+    await supabase.storage.from("car-photos").upload(path, bytes, { contentType: path.endsWith(".png") ? "image/png" : "image/jpeg" });
+  } catch { carHealed.delete(path); }
+}
+
+// Small rounded-square car picture (falls back to a car icon)
+function CarThumb({ uri }: { uri?: string | null }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [uri]);
+  return (
+    <View style={s.carThumb}>
+      {uri && !failed
+        ? <Image source={{ uri }} style={{ width: "100%", height: "100%" }} resizeMode="cover" onError={() => setFailed(true)} />
+        : <Car size={22} color={C.muted} />}
+    </View>
+  );
+}
 
 // Finds posted trips that match the rider's route (and date, if chosen). Refreshes every 10s so seats stay current.
 function useTripSearch(active: boolean, from: string, to: string, day: Date | null, myId?: string) {
@@ -1544,10 +2026,15 @@ function useTripSearch(active: boolean, from: string, to: string, day: Date | nu
         ...r,
         price: Number(r.price), rating: Number(r.rating), seats_total: Number(r.seats_total),
         seats_left: Number(r.seats_left), driver_trips: Number(r.driver_trips),
+        car_photo_url: carPhotoUrl(carPathCache[r.driver_id]),
       }));
       // Trips with free seats first, then by departure time
       rows.sort((a, b) => (b.seats_left > 0 ? 1 : 0) - (a.seats_left > 0 ? 1 : 0) || new Date(a.depart_at).getTime() - new Date(b.depart_at).getTime());
       setTrips(rows);
+      // Photos load after the list is already on screen; a failure here never hides trips
+      loadCarPaths(Array.from(new Set(rows.map((r) => r.driver_id)))).then(() => {
+        if (!cancelled) setTrips((cur) => cur.map((r) => ({ ...r, car_photo_url: carPhotoUrl(carPathCache[r.driver_id]) })));
+      });
     };
     setLoading(true);
     load().finally(() => { if (!cancelled) setLoading(false); });
@@ -1561,12 +2048,14 @@ function useTripSearch(active: boolean, from: string, to: string, day: Date | nu
 // Trip details + "request seats" sheet
 function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onClose: () => void; onRequested: () => void }) {
   const { user, openAuth } = React.useContext(AuthCtx);
+  const { settings } = React.useContext(SettingsCtx);
   const [seats, setSeats] = useState(1);
+  const [pay, setPay] = useState<PayMethod>(settings.payment);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const left = trip?.seats_left ?? 0;
 
-  useEffect(() => { setSeats(1); setError(""); }, [trip?.id]);
+  useEffect(() => { setSeats(1); setError(""); setPay(settings.payment); }, [trip?.id]);
   useEffect(() => { if (seats > left) setSeats(Math.max(1, left)); }, [left]);
 
   const request = async () => {
@@ -1580,8 +2069,9 @@ function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onCl
     }
     setBusy(true); setError("");
     const { error } = await supabase.rpc("request_seat", { p_trip: trip.id, p_seats: seats });
+    if (error) { setBusy(false); return setError(error.message); }
+    await supabase.rpc("set_booking_payment", { p_trip: trip.id, p_method: pay }); // saves how you plan to pay (cash by default)
     setBusy(false);
-    if (error) return setError(error.message);
     onRequested();
   };
 
@@ -1596,7 +2086,7 @@ function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onCl
             </View>
 
             <View style={[s.row, { marginBottom: 16 }]}>
-              <View style={s.avatar}><T style={s.avatarTxt}>{initialsOf(trip.driver_name)}</T></View>
+              <Avatar uri={driverAvatarUrl(trip.driver_id)} initial={initialsOf(trip.driver_name)[0] ?? "?"} size={52} />
               <View style={{ flex: 1, marginLeft: 12 }}>
                 <T style={{ fontWeight: "500" }} numberOfLines={1}>{trip.driver_name}</T>
                 <View style={[s.row, { marginTop: 2 }]}>
@@ -1604,7 +2094,10 @@ function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onCl
                   <T style={[s.muted, { marginLeft: 4 }]}>{trip.driver_trips === 0 ? "New driver" : `${trip.rating.toFixed(1)} · ${plural(trip.driver_trips, "trip")}`}</T>
                 </View>
               </View>
-              <T mono style={[s.muted, s.plate]}>{trip.plate}</T>
+              <View style={{ alignItems: "flex-end", gap: 6 }}>
+                <CarThumb uri={trip.car_photo_url} />
+                <T mono style={[s.muted, s.plate]}>{trip.plate}</T>
+              </View>
             </View>
 
             <View style={[s.row, { marginBottom: 4 }]}>
@@ -1638,6 +2131,15 @@ function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onCl
               </View>
             )}
 
+            {left > 0 && (
+              <View style={{ marginTop: 16 }}>
+                <T style={[s.muted, { marginBottom: 8 }]}>Pay with</T>
+                <PaymentOptions compact value={pay} onChange={setPay} />
+                <T style={[s.muted, { fontSize: 12, marginTop: 8 }]}>
+                  {pay === "cash" ? "You pay the driver in cash when you travel. Card and EFT are coming soon." : "Online payment is coming soon."}
+                </T>
+              </View>
+            )}
             {!!error && <T style={{ color: C.danger, fontSize: 12, marginTop: 12 }}>{error}</T>}
             <Pressable onPress={request} disabled={busy || left <= 0} style={[s.primaryBtn, { marginTop: 16 }, (busy || left <= 0) && { opacity: 0.5 }]}>
               <T style={s.primaryTxt}>
@@ -1657,10 +2159,13 @@ function TripCard({ t, onPress }: { t: OpenTrip; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} style={[s.driver, t.seats_left <= 0 && { opacity: 0.6 }]}>
       <View style={[s.row, { marginBottom: 12 }]}>
-        <View style={s.avatar}><T style={s.avatarTxt}>{initialsOf(t.driver_name)}</T></View>
+        <CarThumb uri={t.car_photo_url} />
         <View style={{ flex: 1, marginLeft: 12 }}>
-          <T style={{ fontWeight: "500" }} numberOfLines={1}>{t.driver_name}</T>
-          <View style={[s.row, { marginTop: 2 }]}>
+          <View style={s.row}>
+            <Avatar uri={driverAvatarUrl(t.driver_id)} initial={initialsOf(t.driver_name)[0] ?? "?"} size={24} />
+            <T style={{ fontWeight: "500", marginLeft: 8, flexShrink: 1 }} numberOfLines={1}>{t.driver_name}</T>
+          </View>
+          <View style={[s.row, { marginTop: 4 }]}>
             <Star size={10} color={C.primary} fill={C.primary} />
             <T style={[s.muted, { marginLeft: 4 }]}>{t.driver_trips === 0 ? "New" : t.rating.toFixed(1)}</T>
             <T style={[s.muted, { marginLeft: 8, flexShrink: 1 }]} numberOfLines={1}>{t.vehicle}</T>
@@ -1749,14 +2254,17 @@ function HomeScreen({ onProfile, prefill, onPrefillUsed, onRequested }: {
     const { error } = await supabase.from("trip_requests").insert({
       rider_id: user.id,
       rider_name: user.name,
-      origin: from.trim() || null,
-      destination: to.trim(),
+      origin: from.trim() ? canon(from) : null, // same spelling drivers use, so a posted trip can match it
+      destination: canon(to),
       travel_date: day ? `${day.getFullYear()}-${two(day.getMonth() + 1)}-${two(day.getDate())}` : null,
       seats: reqSeats,
     });
     setReqBusy(false);
     if (error) return Alert.alert("Could not send request", error.message);
-    Alert.alert("Request sent", "Drivers going your way can see it and post a trip. Check back soon, or change your search.");
+    Alert.alert("Request saved", "It's in your Activity tab under Upcoming. You'll see an update there as soon as a driver posts this trip.", [
+      { text: "Stay here", style: "cancel" },
+      { text: "View Activity", onPress: onRequested },
+    ]);
   };
 
   const tripSheet = (
@@ -1832,13 +2340,13 @@ function HomeScreen({ onProfile, prefill, onPrefillUsed, onRequested }: {
           <View style={[s.search, { padding: 0, overflow: "hidden" }]}>
             <View style={[s.row, s.inputRow, { borderBottomWidth: 1, borderBottomColor: C.border }]}>
               <View style={[s.dot, { backgroundColor: C.primary }]} />
-              <TextInput value={from} onChangeText={setFrom} onFocus={() => setFocus("from")} placeholder="Leaving from (optional)"
+              <TextInput keyboardAppearance={THEME} value={from} onChangeText={setFrom} onFocus={() => setFocus("from")} placeholder="Leaving from (optional)"
                 placeholderTextColor={C.muted} style={s.input} />
               {!!from && <Pressable onPress={() => setFrom("")}><X size={13} color={C.muted} /></Pressable>}
             </View>
             <View style={[s.row, s.inputRow]}>
               <View style={[s.dot, { borderRadius: 2, backgroundColor: C.fgSoft }]} />
-              <TextInput autoFocus value={to} onChangeText={setTo} onFocus={() => setFocus("to")} placeholder="Where are you going?"
+              <TextInput keyboardAppearance={THEME} autoFocus value={to} onChangeText={setTo} onFocus={() => setFocus("to")} placeholder="Where are you going?"
                 placeholderTextColor={C.muted} returnKeyType="search" onSubmitEditing={() => to.trim() && setState("results")} style={s.input} />
               {!!to && <Pressable onPress={() => setTo("")}><X size={13} color={C.muted} /></Pressable>}
             </View>
@@ -2012,6 +2520,13 @@ type MyBooking = {
   driver_name: string; vehicle: string; plate: string; driver_phone: string | null;
 };
 
+// A trip the rider asked for. It waits in Upcoming until a driver posts it, then becomes an update.
+type MyRequest = {
+  id: string; origin: string | null; destination: string; travel_date: string | null; seats: number;
+  status: "open" | "fulfilled" | "cancelled"; created_at: string; fulfilled_at: string | null; seen_at: string | null;
+  depart_at: string | null; price: number | null; driver_name: string | null; vehicle: string | null;
+};
+
 const money = (price: number | null | undefined, seats = 1) => (price == null ? "Fare TBC" : `R${price * seats}`);
 const bookingLabel = (b: MyBooking) => {
   if (b.trip_status === "cancelled") return "Trip cancelled";
@@ -2034,13 +2549,49 @@ function ActivityScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [cancelId, setCancelId] = useState<string | null>(null);
+  const [requests, setRequests] = useState<MyRequest[]>([]);
+  const [pays, setPays] = useState<Record<string, string>>({});
+  const knownUpdates = React.useRef<Set<string> | null>(null);
 
   const load = async () => {
-    if (!user?.id) { setBookings([]); return; }
-    const { data, error } = await supabase.from("rider_bookings").select("*").order("depart_at", { ascending: true });
-    if (error) setError(error.message);
-    else { setError(""); setBookings((data ?? []) as MyBooking[]); }
+    if (!user?.id) { setBookings([]); setRequests([]); return; }
+    const [b, r, p] = await Promise.all([
+      supabase.from("rider_bookings").select("*").order("depart_at", { ascending: true }),
+      supabase.from("my_trip_requests").select("*").order("created_at", { ascending: false }),
+      supabase.from("bookings").select("id, payment_method"),
+    ]);
+    if (b.error) setError(b.error.message);
+    else { setError(""); setBookings((b.data ?? []) as MyBooking[]); }
+    if (!r.error) {
+      const rows = (r.data ?? []) as MyRequest[];
+      setRequests(rows);
+      // Tell the rider the moment a driver posts a trip they asked for
+      const fresh = rows.filter((x) => x.status === "fulfilled" && !x.seen_at);
+      if (knownUpdates.current) {
+        const added = fresh.filter((x) => !knownUpdates.current!.has(x.id));
+        if (added.length > 0) Alert.alert("A driver posted your trip", `${added[0].origin || "Anywhere"} → ${added[0].destination}`);
+      }
+      knownUpdates.current = new Set(fresh.map((x) => x.id));
+    }
+    if (!p.error) setPays(Object.fromEntries(((p.data ?? []) as { id: string; payment_method: string }[]).map((x) => [x.id, x.payment_method])));
   };
+
+  const dismissUpdate = async (id: string) => {
+    await supabase.rpc("mark_request_seen", { p_request: id });
+    await load();
+  };
+  const cancelRequest = (id: string) =>
+    Alert.alert("Cancel this request?", "Drivers will no longer see it.", [
+      { text: "Keep request", style: "cancel" },
+      {
+        text: "Cancel request", style: "destructive",
+        onPress: async () => {
+          const { error } = await supabase.rpc("cancel_trip_request", { p_request: id });
+          if (error) Alert.alert("Could not cancel", error.message);
+          await load();
+        },
+      },
+    ]);
 
   // Loads when the tab opens, then every 15s so a driver's answer shows up without leaving the screen
   useEffect(() => {
@@ -2062,6 +2613,9 @@ function ActivityScreen() {
   const isUpcoming = (b: MyBooking) => (b.status === "pending" || b.status === "accepted") && b.trip_status === "open";
   const upcoming = bookings.filter(isUpcoming);
   const history = bookings.filter((b) => !isUpcoming(b)).sort((a, b) => new Date(b.depart_at).getTime() - new Date(a.depart_at).getTime());
+  const openRequests = requests.filter((r) => r.status === "open");
+  const updates = requests.filter((r) => r.status === "fulfilled" && !r.seen_at);
+  const pastRequests = requests.filter((r) => r.status === "cancelled" || (r.status === "fulfilled" && !!r.seen_at));
 
   return (
     <>
@@ -2084,8 +2638,38 @@ function ActivityScreen() {
           <>
             {!!error && <T style={{ color: C.danger, fontSize: 12, marginBottom: 12 }}>{error}</T>}
 
+            {updates.length > 0 && (
+              <>
+                <Label>Updates</Label>
+                {updates.map((r) => (
+                  <View key={r.id} style={[s.card, { marginBottom: 12, borderColor: "rgba(74,222,128,0.35)" }]}>
+                    <View style={[s.row, { marginBottom: 6 }]}>
+                      <CheckCircle size={14} color={C.green} />
+                      <T style={{ fontWeight: "600", marginLeft: 8 }}>A driver posted your trip</T>
+                    </View>
+                    <T style={{ fontWeight: "500" }} numberOfLines={1}>{r.origin || "Anywhere"} → {r.destination}</T>
+                    <T mono style={[s.muted, { marginTop: 2 }]}>
+                      {r.depart_at ? fmtWhen(r.depart_at) : requestWhen(r)}{r.price != null ? ` · R${r.price} per seat` : ""}
+                    </T>
+                    <View style={[s.row, s.cardFoot, { marginTop: 12 }]}>
+                      <Pressable onPress={() => dismissUpdate(r.id)} style={s.cancelPill}>
+                        <T style={{ fontSize: 12, color: C.muted }}>Dismiss</T>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => { dismissUpdate(r.id); startBooking({ pickup: r.origin ?? "", dest: r.destination }); }}
+                        style={[s.cancelPill, { borderColor: "rgba(37,99,235,0.4)" }]}
+                      >
+                        <T style={{ fontSize: 12, color: C.primary }}>Book a seat</T>
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
+                <View style={{ height: 12 }} />
+              </>
+            )}
+
             <Label>Upcoming rides</Label>
-            {upcoming.length === 0 && (
+            {upcoming.length === 0 && openRequests.length === 0 && (
               <T style={[s.muted, { marginBottom: 24 }]}>{loading ? "Loading..." : "No upcoming rides. Find a driver going your way from Home or Services."}</T>
             )}
             {upcoming.map((b) => {
@@ -2100,7 +2684,7 @@ function ActivityScreen() {
                         <T style={{ fontWeight: "600", flexShrink: 1 }} numberOfLines={1}>{b.destination}</T>
                       </View>
                       <T mono style={s.muted}>{fmtWhen(b.depart_at)}</T>
-                      <T mono style={[s.muted, { marginTop: 2 }]}>{plural(b.seats, "seat")} · {money(b.price, b.seats)}</T>
+                      <T mono style={[s.muted, { marginTop: 2 }]}>{plural(b.seats, "seat")} · {money(b.price, b.seats)}{pays[b.booking_id] ? ` · ${payName(pays[b.booking_id])}` : ""}</T>
                     </View>
                     <T style={[s.booked, pillStyle(label)]}>{label}</T>
                   </View>
@@ -2122,8 +2706,30 @@ function ActivityScreen() {
               );
             })}
 
+            {openRequests.map((r) => (
+              <View key={r.id} style={[s.card, { marginBottom: 12 }]}>
+                <View style={[s.row, { justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }]}>
+                  <View style={{ flex: 1, paddingRight: 8 }}>
+                    <View style={[s.row, { marginBottom: 4 }]}>
+                      <T style={{ fontWeight: "600", flexShrink: 1 }} numberOfLines={1}>{r.origin || "Anywhere"}</T>
+                      <ArrowRight size={13} color={C.primary} style={{ marginHorizontal: 8 }} />
+                      <T style={{ fontWeight: "600", flexShrink: 1 }} numberOfLines={1}>{r.destination}</T>
+                    </View>
+                    <T mono style={s.muted}>{requestWhen(r)} · {plural(r.seats, "seat")}</T>
+                  </View>
+                  <T style={[s.booked, pillStyle("Waiting for driver")]}>Request sent</T>
+                </View>
+                <View style={[s.row, s.cardFoot]}>
+                  <T style={[s.muted, { flex: 1, paddingRight: 8, lineHeight: 17 }]}>Waiting for a driver to post this trip. We'll update you here.</T>
+                  <Pressable onPress={() => cancelRequest(r.id)} style={s.cancelPill}>
+                    <T style={{ fontSize: 12, color: C.danger }}>Cancel</T>
+                  </Pressable>
+                </View>
+              </View>
+            ))}
+
             <Label>History</Label>
-            {history.length === 0 && <T style={s.muted}>{loading ? "" : "Completed, declined and cancelled rides show up here."}</T>}
+            {history.length === 0 && pastRequests.length === 0 && <T style={s.muted}>{loading ? "" : "Completed, declined and cancelled rides show up here."}</T>}
             {history.map((b) => {
               const label = bookingLabel(b);
               return (
@@ -2147,6 +2753,27 @@ function ActivityScreen() {
                 </View>
               );
             })}
+            {pastRequests.map((r) => (
+              <View key={r.id} style={[s.card, { marginBottom: 12 }]}>
+                <View style={[s.row, { justifyContent: "space-between", marginBottom: 8 }]}>
+                  <View style={[s.row, { flex: 1, paddingRight: 8 }]}>
+                    {r.status === "fulfilled" ? <CheckCircle size={14} color={C.primary} /> : <X size={14} color={C.muted} />}
+                    <T style={{ fontWeight: "500", marginLeft: 8, flexShrink: 1 }} numberOfLines={1}>{r.origin || "Anywhere"}</T>
+                    <ArrowRight size={12} color={C.muted} style={{ marginHorizontal: 6 }} />
+                    <T style={{ fontWeight: "500", flexShrink: 1 }} numberOfLines={1}>{r.destination}</T>
+                  </View>
+                </View>
+                <View style={[s.row, { justifyContent: "space-between" }]}>
+                  <T mono style={s.muted}>{requestWhen(r)} · {r.status === "fulfilled" ? "Driver posted this trip" : "Request cancelled"}</T>
+                  {r.status === "fulfilled" && (
+                    <Pressable onPress={() => startBooking({ pickup: r.origin ?? "", dest: r.destination })} style={s.row}>
+                      <RotateCcw size={11} color={C.primary} />
+                      <T style={{ fontSize: 12, color: C.primary, marginLeft: 4 }}>Find rides</T>
+                    </Pressable>
+                  )}
+                </View>
+              </View>
+            ))}
           </>
         )}
       </ScrollView>
@@ -2177,15 +2804,20 @@ function ActivityScreen() {
 function AccountScreen() {
   const { user, setUser, openAuth, openDriver, isDriver } = React.useContext(AuthCtx);
   const [manageOpen, setManageOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(() => KEEP_SETTINGS_OPEN);
+  const [payOpen, setPayOpen] = useState(false);
   const [info, setInfo] = useState<string | null>(null);
   const INFO_PAGES = ["Safety", "Help", "Legal", "Contact us", "About us"];
   return (
     <ScrollView contentContainerStyle={{ paddingTop: 24, paddingBottom: 24 }}>
       <Pressable onPress={user ? () => setManageOpen(true) : openAuth} style={[s.row, { paddingHorizontal: 16, marginBottom: 24 }]}>
-        <View style={[s.avatar, { width: 64, height: 64, borderRadius: 32, borderWidth: 1, borderColor: "rgba(37,99,235,0.3)" }]}>
-          {user ? <T style={{ color: C.primary, fontWeight: "600", fontSize: 24 }}>{user.name[0]?.toUpperCase()}</T> : <User size={26} color={C.primary} />}
-        </View>
+        {user ? (
+          <Avatar uri={user.avatar} initial={user.name[0]?.toUpperCase() ?? "?"} size={64} />
+        ) : (
+          <View style={[s.avatar, { width: 64, height: 64, borderRadius: 32, borderWidth: 1, borderColor: "rgba(37,99,235,0.3)" }]}>
+            <User size={26} color={C.primary} />
+          </View>
+        )}
         <View style={{ marginLeft: 16 }}>
           <T style={{ fontWeight: "600", fontSize: 16 }}>{user ? user.name : "Guest"}</T>
           <T style={[s.muted, { marginTop: 2 }]}>{user ? user.phone || user.email : "Tap to sign in"}</T>
@@ -2196,6 +2828,7 @@ function AccountScreen() {
           <Pressable key={label + i} onPress={() => {
             if (label === "Manage Account") { user ? setManageOpen(true) : openAuth(); }
             if (label === "Settings") setSettingsOpen(true);
+            if (label === "Payment methods") setPayOpen(true);
             if (INFO_PAGES.includes(label)) setInfo(label);
             if (label === "Be a driver") {
               user ? openDriver() : Alert.alert("Sign in to drive", "Create an account or log in to become a driver.", [
@@ -2203,7 +2836,7 @@ function AccountScreen() {
                 { text: "Sign in", onPress: () => openAuth() },
               ]);
             }
-          }} style={[s.row, s.menuItem, i === 2 && { marginTop: 16, borderTopWidth: 1, borderTopColor: C.border }]}>
+          }} style={[s.row, s.menuItem, label === "Be a driver" && { marginTop: 16, borderTopWidth: 1, borderTopColor: C.border }]}>
             <View style={s.menuIcon}><Icon size={16} color={C.muted} /></View>
             <T style={{ flex: 1, fontWeight: "500", marginLeft: 16 }}>{label === "Be a driver" && isDriver ? "Driver profile" : label}</T>
             <ChevronRight size={15} color={C.muted} />
@@ -2218,6 +2851,7 @@ function AccountScreen() {
       <T mono style={[s.muted, { textAlign: "center", marginTop: 24 }]}>MzansiLift v1.0.0 · South Africa</T>
       <ManageAccountModal visible={manageOpen} onClose={() => setManageOpen(false)} />
       <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <PaymentModal visible={payOpen} onClose={() => setPayOpen(false)} />
       <InfoModal kind={info} onClose={() => setInfo(null)} />
     </ScrollView>
   );
@@ -2248,7 +2882,11 @@ export default function App() {
   const systemScheme = useColorScheme();
   const themeName: "dark" | "light" = settings.theme === "system" ? (systemScheme === "light" ? "light" : "dark") : settings.theme;
   applyTheme(themeName); // switches the shared colours and styles before the screens below render
-
+  useEffect(() => {
+    // Makes native alerts, the keyboard and system dialogs follow the in-app choice
+    Appearance.setColorScheme(settings.theme === "system" ? "unspecified" : settings.theme);
+  }, [settings.theme]);
+  
   // Saved settings (mode, map options)
   useEffect(() => {
     AsyncStorage.getItem("mzl.settings")
@@ -2325,7 +2963,7 @@ export default function App() {
   return (
     <SettingsCtx.Provider value={{ settings, update }}>
       <AuthCtx.Provider value={{ user, setUser, openAuth: () => openAuth("signin"), openDriver: () => setDriverOpen(true), startBooking, isDriver }}>
-        <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
+        <SafeAreaView key={themeName} style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
           <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
           {loading || !settingsLoaded ? null : showWelcome ? (
             <WelcomeScreen onLogin={() => openAuth("signin")} onSignup={() => openAuth("signup")} onGuest={() => setGuest(true)} />
@@ -2372,6 +3010,7 @@ const makeStyles = () => StyleSheet.create({
   card: { backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 16, padding: 16 },
   cardFoot: { justifyContent: "space-between", paddingTop: 12, borderTopWidth: 1, borderTopColor: C.border },
   avatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(37,99,235,0.15)", alignItems: "center", justifyContent: "center" },
+  carThumb: { width: 52, height: 52, borderRadius: 14, backgroundColor: C.card, borderWidth: 1, borderColor: C.border, alignItems: "center", justifyContent: "center", overflow: "hidden" },
   avatarTxt: { color: C.primary, fontWeight: "600" },
   roundBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.secondary, borderWidth: 1, borderColor: C.border, alignItems: "center", justifyContent: "center" },
   statsRow: { flexDirection: "row", marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.border },
