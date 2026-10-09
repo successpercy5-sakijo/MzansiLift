@@ -201,7 +201,7 @@ if (typeof L === 'undefined') {
   var current = '__INIT__';
   layers[current].addTo(map);
   document.body.className = current === 'light' ? 'lt' : '';
-  var meM = null, pinM = null, drvM = [], lastRecenter = 0;
+  var meM = null, pinM = null, drvM = [], lastRecenter = 0, lastFit = 0;
 
   function post(o) { if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify(o)); }
   map.on('click', function (e) { post({ type: 'pin', lat: e.latlng.lat, lng: e.latlng.lng }); });
@@ -233,12 +233,19 @@ if (typeof L === 'undefined') {
     drvM = (d.drivers || []).map(function (p) {
       return L.marker([p.latitude, p.longitude], { icon: L.divIcon({ className: '', html: '<div class="drv"><i></i></div>', iconSize: [24, 24], iconAnchor: [12, 12] }) }).addTo(map);
     });
+    if (d.fitKey && d.fitKey !== lastFit) {
+      lastFit = d.fitKey;
+      var pts = drvM.map(function (m) { return m.getLatLng(); });
+      if (pinM) pts.push(pinM.getLatLng());
+      if (pts.length > 1) map.fitBounds(L.latLngBounds(pts), { padding: [48, 48], maxZoom: 15 });
+      else if (pts.length === 1) map.setView(pts[0], 13);
+    }
   };
 }
 </script></body></html>`;
 
-function MapView({ me, drivers = [], pin = null, dark = true, recenterKey = 0, onPin }: {
-  me: Pt | null; drivers?: (Pt & { id: string })[]; pin?: Pt | null; dark?: boolean; recenterKey?: number; onPin?: (p: Pt) => void;
+function MapView({ me, drivers = [], pin = null, dark = true, recenterKey = 0, fitKey = 0, onPin }: {
+  me: Pt | null; drivers?: (Pt & { id: string })[]; pin?: Pt | null; dark?: boolean; recenterKey?: number; fitKey?: number; onPin?: (p: Pt) => void;
 }) {
   const webRef = React.useRef<WebView>(null);
   const [ready, setReady] = useState(false);
@@ -249,7 +256,7 @@ function MapView({ me, drivers = [], pin = null, dark = true, recenterKey = 0, o
   );
 
   // Sends your position, the pin and the map style into the page whenever they change
-  const payload = JSON.stringify({ me, drivers, pin, style: dark ? "dark" : "light", recenter: recenterKey, bg: C.bg });
+  const payload = JSON.stringify({ me, drivers, pin, style: dark ? "dark" : "light", recenter: recenterKey, fitKey, bg: C.bg });
   useEffect(() => {
     if (!ready) return;
     webRef.current?.injectJavaScript(`window.setState && window.setState(${payload}); true;`);
@@ -597,7 +604,7 @@ async function uploadPhoto(bucket: string, path: string, pic: Picked, upsert = f
   }
   if (body.byteLength === 0) throw new Error("Could not read the file. Try a different one.");
   try {
-    const { error } = await supabase.storage.from(bucket).upload(path, body, { contentType: pic.mime, upsert });
+    const { error } = await supabase.storage.from(bucket).upload(path, body, { contentType: pic.mime, upsert, cacheControl: "60" });
     if (error) throw new Error(error.message);
   } catch (e: any) {
     throw new Error(`Upload failed: ${e?.message ?? "unknown error"}. Check your internet connection.`);
@@ -755,14 +762,50 @@ function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: bool
   );
 }
 
+// ---------- Avatars: the storage bucket is the source of truth, updated_at is the cache-buster ----------
+const avatarCache: Record<string, { url?: string; at: number }> = {};
+const avatarListeners = new Set<() => void>();
+
+// Call after uploading/removing a photo so every Avatar on screen reloads
+function refreshAvatar(id: string) {
+  delete avatarCache[id];
+  avatarListeners.forEach((f) => f());
+}
+
+async function resolveAvatar(id: string): Promise<string | undefined> {
+  const hit = avatarCache[id];
+  if (hit && Date.now() - hit.at < 60_000) return hit.url;
+  const { data, error } = await supabase.storage.from("avatars").list(id, { limit: 1, search: "avatar" });
+  if (error) return hit?.url;
+  const f: any = data?.[0];
+  const url = f
+    ? `${supabase.storage.from("avatars").getPublicUrl(`${id}/avatar`).data.publicUrl}?v=${new Date(f.updated_at ?? f.created_at ?? 0).getTime()}`
+    : undefined; // file deleted -> show initials
+  avatarCache[id] = { url, at: Date.now() };
+  return url;
+}
+
 // Profile picture, falling back to the first letter if there is none or it can't load
-function Avatar({ uri, initial, size, style }: { uri?: string; initial: string; size: number; style?: any }) {
+function Avatar({ userId, initial, size, style }: { userId?: string; initial: string; size: number; style?: any }) {
+  const [uri, setUri] = useState<string | undefined>();
   const [failed, setFailed] = useState(false);
-  useEffect(() => { setFailed(false); }, [uri]);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const f = () => setTick((t) => t + 1);
+    avatarListeners.add(f);
+    return () => { avatarListeners.delete(f); };
+  }, []);
+  useEffect(() => {
+    let off = false;
+    setFailed(false);
+    if (!userId) { setUri(undefined); return; }
+    resolveAvatar(userId).then((u) => { if (!off) setUri(u); });
+    return () => { off = true; };
+  }, [userId, tick]);
   return (
     <View style={[s.avatar, { width: size, height: size, borderRadius: size / 2, overflow: "hidden" }, style]}>
       {uri && !failed
-        ? <Image source={{ uri }} style={{ width: size, height: size }} resizeMode="cover" onError={() => setFailed(true)} />
+        ? <Image key={uri} source={{ uri }} style={{ width: size, height: size }} resizeMode="cover" onError={() => setFailed(true)} />
         : <T style={{ color: C.primary, fontWeight: "600", fontSize: Math.round(size * 0.37) }}>{initial}</T>}
     </View>
   );
@@ -844,6 +887,7 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
       const url = `${supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl}?v=${Date.now()}`;
       const { error } = await supabase.auth.updateUser({ data: { avatar_url: url } });
       if (error) throw new Error(error.message);
+      refreshAvatar(user.id);
       const check = await fetch(url, { method: "HEAD" }).catch(() => null);
       if (check && !check.ok) {
         Alert.alert("Photo saved but can't be shown", "The avatars storage bucket is not public. In Supabase run setup_storage.sql again, or open Storage, then avatars, and make it public.");
@@ -899,7 +943,7 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
           </View>
           <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
             <Pressable onPress={changePhoto} disabled={photoBusy} style={{ alignItems: "center", marginBottom: 24 }}>
-              <Avatar uri={user?.avatar} initial={first[0]?.toUpperCase() ?? "?"} size={88} />
+              <Avatar userId={user?.id} initial={first[0]?.toUpperCase() ?? "?"} size={88} />
               <View style={[s.row, { marginTop: 8 }]}>
                 <Camera size={13} color={C.primary} />
                 <T style={{ color: C.primary, fontSize: 13, marginLeft: 6 }}>{photoBusy ? "Uploading..." : "Change photo"}</T>
@@ -1255,7 +1299,253 @@ function InfoModal({ kind, onClose }: { kind: string | null; onClose: () => void
   );
 }
 
+// ---------- Rider <-> driver: chat and live "driver is coming" tracking ----------
+// All of it runs through database functions (see chat_and_tracking.sql), so only the rider and the driver of a booking can use it.
+type ChatMsg = { msg_id: string; body: string; created_at: string; mine: boolean; from_driver: boolean };
+
+function ChatModal({ bookingId, title, onClose }: { bookingId: string | null; title: string; onClose: () => void }) {
+  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const scrollRef = React.useRef<ScrollView>(null);
+
+  const load = async () => {
+    if (!bookingId) return;
+    const { data, error } = await supabase.rpc("get_trip_messages", { p_booking: bookingId });
+    if (error) { setError(error.message); return; }
+    setError(""); setMsgs((data ?? []) as ChatMsg[]);
+  };
+  useEffect(() => {
+    if (!bookingId) { setMsgs([]); setText(""); setError(""); return; }
+    load();
+    const t = setInterval(load, 4000); // new messages appear within a few seconds
+    return () => clearInterval(t);
+  }, [bookingId]);
+
+  const send = async () => {
+    const body = text.trim();
+    if (!bookingId || !body || busy) return;
+    setBusy(true); setError("");
+    const { error } = await supabase.rpc("send_trip_message", { p_booking: bookingId, p_body: body });
+    setBusy(false);
+    if (error) return setError(error.message);
+    setText("");
+    await load();
+  };
+
+  return (
+    <Modal visible={!!bookingId} animationType="slide" onRequestClose={onClose}>
+      <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={[s.row, { padding: 16 }]}>
+            <Pressable onPress={onClose} style={s.roundBtn}><ChevronLeft size={18} color={C.fg} /></Pressable>
+            <T style={{ fontWeight: "600", fontSize: 18, marginLeft: 12, flex: 1 }} numberOfLines={1}>{title}</T>
+          </View>
+          <ScrollView
+            ref={scrollRef}
+            contentContainerStyle={{ padding: 16, paddingTop: 4, gap: 8 }}
+            onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+            keyboardShouldPersistTaps="handled"
+          >
+            {msgs.length === 0 && !error && (
+              <T style={[s.muted, { textAlign: "center", marginTop: 24, lineHeight: 18 }]}>
+                No messages yet. Say hello and agree on where to meet.
+              </T>
+            )}
+            {msgs.map((m) => (
+              <View key={m.msg_id} style={{ alignItems: m.mine ? "flex-end" : "flex-start" }}>
+                <View style={{
+                  maxWidth: "80%", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16,
+                  backgroundColor: m.mine ? C.primary : C.secondary,
+                  borderWidth: m.mine ? 0 : 1, borderColor: C.border,
+                }}>
+                  <T style={{ color: m.mine ? "#fff" : C.fg, lineHeight: 19 }}>{m.body}</T>
+                </View>
+                <T mono style={[s.muted, { fontSize: 10, marginTop: 2 }]}>{two(new Date(m.created_at).getHours())}:{two(new Date(m.created_at).getMinutes())}</T>
+              </View>
+            ))}
+          </ScrollView>
+          {!!error && <T style={{ color: C.danger, fontSize: 12, paddingHorizontal: 16, paddingBottom: 8 }}>{error}</T>}
+          <View style={[s.row, { padding: 12, gap: 8, borderTopWidth: 1, borderTopColor: C.border }]}>
+            <TextInput
+              value={text}
+              onChangeText={setText}
+              placeholder="Type a message"
+              placeholderTextColor={C.muted}
+              keyboardAppearance={THEME}
+              maxLength={1000}
+              multiline
+              style={{ flex: 1, maxHeight: 100, backgroundColor: C.secondary, borderWidth: 1, borderColor: C.border, borderRadius: 16, color: C.fg, paddingHorizontal: 14, paddingVertical: 10 }}
+            />
+            <Pressable onPress={send} disabled={busy || !text.trim()} style={[s.tripIcon, { width: 44, height: 44, borderRadius: 22 }, (busy || !text.trim()) && { opacity: 0.5 }]}>
+              <ArrowRight size={18} color="#fff" />
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+// Driver side: sends the phone's position while "I'm on my way" is on.
+// Works while the app is open (foreground only), so the driver should keep the screen on during the pickup.
+function useShareLocation(tripId: string | null) {
+  useEffect(() => {
+    if (!tripId) return;
+    let cancelled = false;
+    let sub: Location.LocationSubscription | undefined;
+    let last = 0;
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted" || cancelled) return;
+      const w = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, timeInterval: 8000, distanceInterval: 15 },
+        ({ coords }) => {
+          if (Date.now() - last < 5000) return;
+          last = Date.now();
+          supabase.rpc("update_driver_location", { p_trip: tripId, p_lat: coords.latitude, p_lng: coords.longitude }).then(() => { });
+        }
+      );
+      if (cancelled) w.remove(); else sub = w;
+    })();
+    return () => { cancelled = true; sub?.remove(); };
+  }, [tripId]);
+}
+
+const toRad = (d: number) => (d * Math.PI) / 180;
+const distKm = (a: Pt, b: Pt) => {
+  const dLat = toRad(b.latitude - a.latitude), dLng = toRad(b.longitude - a.longitude);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(h));
+};
+const ageText = (iso: string) => {
+  const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  return m < 1 ? "just now" : m === 1 ? "1 min ago" : `${m} min ago`;
+};
+type DriverFix = { lat: number; lng: number; sharing: boolean; updated_at: string };
+
+// Rider side: shows where the driver is, how far, and a rough arrival time
+function TrackModal({ booking, onClose, onMessage }: { booking: MyBooking | null; onClose: () => void; onMessage: (b: MyBooking) => void }) {
+  const [fix, setFix] = useState<DriverFix | null | undefined>(undefined); // undefined = still loading
+  const [from, setFrom] = useState<Pt | null>(null);
+  const [fitKey, setFitKey] = useState(0);
+  const [error, setError] = useState("");
+  const [, setTick] = useState(0);
+  const fitted = React.useRef(false);
+  const bid = booking?.booking_id;
+
+  useEffect(() => {
+    fitted.current = false;
+    if (!bid || !booking) { setFix(undefined); setFrom(null); setError(""); return; }
+    let off = false;
+    geocodeTown(booking.origin).then((p) => { if (!off) setFrom(p); });
+    const load = async () => {
+      const { data, error } = await supabase.rpc("get_driver_location", { p_booking: bid });
+      if (off) return;
+      if (error) { setError(error.message); return; }
+      setError("");
+      setFix(((data ?? []) as DriverFix[])[0] ?? null);
+      setTick((n) => n + 1);
+    };
+    load();
+    const t = setInterval(load, 6000);
+    return () => { off = true; clearInterval(t); };
+  }, [bid]);
+
+  const live = !!fix && fix.sharing && Date.now() - new Date(fix.updated_at).getTime() < 2 * 60 * 1000;
+  const driverPt: Pt | null = fix ? { latitude: fix.lat, longitude: fix.lng } : null;
+  const km = live && driverPt && from ? distKm(driverPt, from) : null;
+  const mins = km == null ? null : Math.max(1, Math.round((km / 50) * 60)); // rough: 50 km/h average
+
+  useEffect(() => {
+    if (driverPt && from && !fitted.current) { fitted.current = true; setFitKey((k) => k + 1); }
+  }, [fix, from]);
+
+  return (
+    <Modal visible={!!booking} animationType="slide" onRequestClose={onClose}>
+      <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
+        <View style={[s.row, { padding: 16 }]}>
+          <Pressable onPress={onClose} style={s.roundBtn}><ChevronLeft size={18} color={C.fg} /></Pressable>
+          <T style={{ fontWeight: "600", fontSize: 18, marginLeft: 12 }}>Your driver</T>
+        </View>
+        {booking && (
+          <View style={{ flex: 1, padding: 16, paddingTop: 0 }}>
+            <View style={{ flex: 1, borderRadius: 16, overflow: "hidden", borderWidth: 1, borderColor: C.border, marginBottom: 12 }}>
+              <MapView
+                me={null}
+                drivers={driverPt ? [{ id: "driver", ...driverPt }] : []}
+                pin={from}
+                dark={THEME === "dark"}
+                fitKey={fitKey}
+              />
+            </View>
+
+            <View style={[s.card, { marginBottom: 12 }]}>
+              {fix === undefined ? (
+                <T style={s.muted}>Checking where your driver is...</T>
+              ) : !fix || !fix.sharing ? (
+                <>
+                  <T style={{ fontWeight: "600", marginBottom: 4 }}>Your driver hasn't set off yet</T>
+                  <T style={[s.muted, { lineHeight: 18 }]}>
+                    You'll see them on the map here once they tap "I'm on my way". Departure is {fmtWhen(booking.depart_at)}.
+                  </T>
+                </>
+              ) : !live ? (
+                <>
+                  <T style={{ fontWeight: "600", marginBottom: 4 }}>Waiting for your driver's location</T>
+                  <T style={[s.muted, { lineHeight: 18 }]}>
+                    Last seen {ageText(fix.updated_at)}. Their phone may be offline or the app may be closed. Try messaging or calling them.
+                  </T>
+                </>
+              ) : (
+                <>
+                  <View style={s.row}>
+                    <Navigation size={16} color={C.green} />
+                    <T style={{ fontWeight: "600", marginLeft: 8, color: C.green }}>
+                      {km != null && km < 0.3 ? "Your driver is at the pickup" : "Your driver is on the way"}
+                    </T>
+                  </View>
+                  {km != null && km >= 0.3 && (
+                    <T mono style={{ fontWeight: "600", fontSize: 20, color: C.primary, marginTop: 8 }}>
+                      {km < 10 ? km.toFixed(1) : Math.round(km)} km · about {mins! >= 60 ? `${Math.floor(mins! / 60)} h ${mins! % 60} min` : `${mins} min`}
+                    </T>
+                  )}
+                  <T style={[s.muted, { marginTop: 6, lineHeight: 17 }]}>
+                    Distance to {booking.origin}, the pickup town. Arrival time is a rough estimate. Updated {ageText(fix.updated_at)}.
+                  </T>
+                </>
+              )}
+              {!!error && <T style={{ color: C.danger, fontSize: 12, marginTop: 8 }}>{error}</T>}
+            </View>
+
+            <T style={[s.muted, { marginBottom: 12 }]} numberOfLines={1}>{booking.driver_name} · {booking.vehicle} · {booking.plate}</T>
+            <View style={[s.row, { gap: 8 }]}>
+              <Pressable onPress={() => onMessage(booking)} style={[s.primaryBtn, { flex: 1, flexDirection: "row" }]}>
+                <MessageCircle size={16} color="#fff" />
+                <T style={[s.primaryTxt, { marginLeft: 8 }]}>Message</T>
+              </Pressable>
+              {!!booking.driver_phone && (
+                <Pressable
+                  onPress={() => Linking.openURL(`tel:${booking.driver_phone}`)}
+                  style={[s.primaryBtn, { flex: 1, flexDirection: "row", backgroundColor: C.secondary, borderWidth: 1, borderColor: C.border }]}
+                >
+                  <Phone size={16} color={C.fg} />
+                  <T style={[s.primaryTxt, { marginLeft: 8, color: C.fg }]}>Call</T>
+                </Pressable>
+              )}
+            </View>
+          </View>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 // ---------- Driver side ----------
+
 type DriverProfile = { id: string; full_name: string; phone: string; vehicle: string; plate: string; car_seats: number; rating: number; trips: number };
 type TripBooking = { id: string; rider_name: string; rider_phone: string | null; seats: number; payment_method?: string | null; status: "pending" | "accepted" | "declined" | "cancelled" };
 type MyTrip = {
@@ -1565,6 +1855,9 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
   const [quote, setQuote] = useState<{ o: Pt | null; d: Pt | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState("");
+  const [chat, setChat] = useState<{ id: string; title: string } | null>(null);
+  const [sharingTrip, setSharingTrip] = useState<string | null>(null); // the trip whose location is being shared
+  useShareLocation(sharingTrip);
 
   const load = async () => {
     const { data: auth } = await supabase.auth.getUser();
@@ -1687,6 +1980,22 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
     const { error } = await supabase.rpc("complete_trip", { p_trip: t.id });
     if (error) Alert.alert("Could not update", error.message);
     await load();
+  };
+
+  // Stop sharing automatically once the trip is completed or cancelled
+  useEffect(() => {
+    if (sharingTrip && !trips.some((t) => t.id === sharingTrip && t.status === "open")) setSharingTrip(null);
+  }, [trips]);
+
+  const startSharing = async (t: MyTrip) => {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== "granted") return Alert.alert("Location needed", "Allow location access in your phone's settings so riders can see you coming.");
+    setSharingTrip(t.id);
+    Alert.alert("Riders can see you now", "Keep the app open and your screen on while you drive to the pickup. Tap Stop when you've picked everyone up.");
+  };
+  const stopSharing = async (t: MyTrip) => {
+    setSharingTrip(null);
+    await supabase.rpc("stop_sharing_location", { p_trip: t.id });
   };
 
   const openTrips = trips.filter((t) => t.status === "open");
@@ -1877,11 +2186,35 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                           </Pressable>
                         </View>
                       ) : (
-                        <T style={[s.booked, { color: C.green, backgroundColor: "rgba(74,222,128,0.1)", borderColor: "rgba(74,222,128,0.25)" }]}>Confirmed</T>
+                        <View style={[s.row, { gap: 8 }]}>
+                          <Pressable onPress={() => setChat({ id: b.id, title: b.rider_name })} style={s.roundBtn}>
+                            <MessageCircle size={16} color={C.primary} />
+                          </Pressable>
+                          <T style={[s.booked, { color: C.green, backgroundColor: "rgba(74,222,128,0.1)", borderColor: "rgba(74,222,128,0.25)" }]}>Confirmed</T>
+                        </View>
                       )}
                     </View>
                   );
                 })}
+
+                {reqs.some((b) => b.status === "accepted") && (
+                  sharingTrip === t.id ? (
+                    <View style={[s.row, { justifyContent: "space-between", marginTop: 12 }]}>
+                      <View style={[s.row, { flex: 1, paddingRight: 8 }]}>
+                        <Navigation size={14} color={C.green} />
+                        <T style={{ color: C.green, marginLeft: 8, flexShrink: 1 }}>Riders can see you coming</T>
+                      </View>
+                      <Pressable onPress={() => stopSharing(t)} style={s.cancelPill}>
+                        <T style={{ fontSize: 12, color: C.danger }}>Stop</T>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <Pressable onPress={() => startSharing(t)} style={[s.primaryBtn, { flexDirection: "row", marginTop: 12, paddingVertical: 10 }]}>
+                      <Navigation size={14} color="#fff" />
+                      <T style={[s.primaryTxt, { marginLeft: 8 }]}>I'm on my way</T>
+                    </Pressable>
+                  )
+                )}
 
                 <View style={[s.row, s.cardFoot, { marginTop: 12 }]}>
                   <Pressable onPress={() => completeTrip(t)} style={[s.cancelPill, { borderColor: "rgba(74,222,128,0.3)" }]}>
@@ -1911,6 +2244,7 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
           )}
         </>
       )}
+      <ChatModal bookingId={chat?.id ?? null} title={chat?.title ?? ""} onClose={() => setChat(null)} />
     </ScrollView>
   );
 }
@@ -1954,8 +2288,7 @@ type OpenTrip = {
   car_photo_path?: string | null; car_photo_url?: string | null; // car photo of an approved driver
 };
 
-// A driver's profile photo lives in the public "avatars" bucket at <id>/avatar (the Avatar component shows initials if there isn't one)
-const driverAvatarUrl = (id: string) => supabase.storage.from("avatars").getPublicUrl(`${id}/avatar`).data.publicUrl;
+// A driver's profile photo lives in the public "avatars" bucket at <id>/avatar (see resolveAvatar / Avatar above)
 
 // Car photos for riders live in their own PUBLIC bucket "car-photos", separate from the private "driver-docs" bucket that holds licences.
 // Which car photo belongs to which APPROVED driver (separate view, so the main trips list never depends on it)
@@ -2086,7 +2419,7 @@ function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onCl
             </View>
 
             <View style={[s.row, { marginBottom: 16 }]}>
-              <Avatar uri={driverAvatarUrl(trip.driver_id)} initial={initialsOf(trip.driver_name)[0] ?? "?"} size={52} />
+              <Avatar userId={trip.driver_id} initial={initialsOf(trip.driver_name)[0] ?? "?"} size={52} />
               <View style={{ flex: 1, marginLeft: 12 }}>
                 <T style={{ fontWeight: "500" }} numberOfLines={1}>{trip.driver_name}</T>
                 <View style={[s.row, { marginTop: 2 }]}>
@@ -2162,7 +2495,7 @@ function TripCard({ t, onPress }: { t: OpenTrip; onPress: () => void }) {
         <CarThumb uri={t.car_photo_url} />
         <View style={{ flex: 1, marginLeft: 12 }}>
           <View style={s.row}>
-            <Avatar uri={driverAvatarUrl(t.driver_id)} initial={initialsOf(t.driver_name)[0] ?? "?"} size={24} />
+            <Avatar userId={t.driver_id} initial={initialsOf(t.driver_name)[0] ?? "?"} size={24} />
             <T style={{ fontWeight: "500", marginLeft: 8, flexShrink: 1 }} numberOfLines={1}>{t.driver_name}</T>
           </View>
           <View style={[s.row, { marginTop: 4 }]}>
@@ -2549,6 +2882,8 @@ function ActivityScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [cancelId, setCancelId] = useState<string | null>(null);
+  const [chat, setChat] = useState<{ id: string; title: string } | null>(null);
+  const [track, setTrack] = useState<MyBooking | null>(null);
   const [requests, setRequests] = useState<MyRequest[]>([]);
   const [pays, setPays] = useState<Record<string, string>>({});
   const knownUpdates = React.useRef<Set<string> | null>(null);
@@ -2702,6 +3037,21 @@ function ActivityScreen() {
                       <T style={{ fontSize: 12, color: C.danger }}>Cancel</T>
                     </Pressable>
                   </View>
+                  {b.status === "accepted" && (
+                    <View style={[s.row, { gap: 8, marginTop: 12 }]}>
+                      <Pressable onPress={() => setTrack(b)} style={[s.primaryBtn, { flex: 1, flexDirection: "row", paddingVertical: 10 }]}>
+                        <Navigation size={14} color="#fff" />
+                        <T style={[s.primaryTxt, { marginLeft: 6 }]}>Track driver</T>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => setChat({ id: b.booking_id, title: b.driver_name })}
+                        style={[s.primaryBtn, { flex: 1, flexDirection: "row", paddingVertical: 10, backgroundColor: C.secondary, borderWidth: 1, borderColor: C.border }]}
+                      >
+                        <MessageCircle size={14} color={C.fg} />
+                        <T style={[s.primaryTxt, { marginLeft: 6, color: C.fg }]}>Message</T>
+                      </Pressable>
+                    </View>
+                  )}
                 </View>
               );
             })}
@@ -2778,6 +3128,12 @@ function ActivityScreen() {
         )}
       </ScrollView>
 
+      <TrackModal
+        booking={track}
+        onClose={() => setTrack(null)}
+        onMessage={(b) => { setTrack(null); setTimeout(() => setChat({ id: b.booking_id, title: b.driver_name }), 400); }}
+      />
+      <ChatModal bookingId={chat?.id ?? null} title={chat?.title ?? ""} onClose={() => setChat(null)} />
       <Modal visible={cancelId !== null} transparent animationType="slide" onRequestClose={() => setCancelId(null)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end", padding: 16 }}>
           <View style={[s.card, { borderRadius: 24, padding: 24 }]}>
@@ -2812,7 +3168,7 @@ function AccountScreen() {
     <ScrollView contentContainerStyle={{ paddingTop: 24, paddingBottom: 24 }}>
       <Pressable onPress={user ? () => setManageOpen(true) : openAuth} style={[s.row, { paddingHorizontal: 16, marginBottom: 24 }]}>
         {user ? (
-          <Avatar uri={user.avatar} initial={user.name[0]?.toUpperCase() ?? "?"} size={64} />
+          <Avatar userId={user.id} initial={user.name[0]?.toUpperCase() ?? "?"} size={64} />
         ) : (
           <View style={[s.avatar, { width: 64, height: 64, borderRadius: 32, borderWidth: 1, borderColor: "rgba(37,99,235,0.3)" }]}>
             <User size={26} color={C.primary} />
