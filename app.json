@@ -13,6 +13,7 @@
     },
     "android": {
       "package": "za.co.mzansilift",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#FFFFFF"
@@ -51,7 +52,7 @@
       [
         "react-native-maps",
         {
-          "androidGoogleMapsApiKey": "AIzaSyA0g1r6k3J4x5y6z7a8b9c0d1e2f3g4h5i"
+          "androidGoogleMapsApiKey": "AIzaSyA2uzpRENeIMj7ZphVtsNJrY2G3t-djdjw"
         }
       ],
       [

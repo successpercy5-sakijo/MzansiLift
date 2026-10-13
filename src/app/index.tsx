@@ -1,5 +1,6 @@
 "use no memo";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import Constants from "expo-constants";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
@@ -18,6 +19,7 @@ import {
   CreditCard,
   Eye, EyeOff,
   FileText,
+  Flag,
   Globe,
   Heart,
   HelpCircle,
@@ -27,6 +29,7 @@ import {
   Layers,
   Lock,
   Mail,
+  MailOpen,
   MapPin,
   MessageCircle,
   Minus,
@@ -70,18 +73,29 @@ import {
 import { WebView } from "react-native-webview";
 import { supabase } from "../lib/supabase";
 
+// Optional native modules. If one is missing from the app build you are running (Expo Go, an old dev build, or not
+// installed yet) the app still opens and that feature just switches off, instead of crashing on start.
+let Notifications: any = null;
+try { Notifications = require("expo-notifications"); } catch { /* push notifications switched off */ }
+let KeepAwake: any = null;
+try { KeepAwake = require("expo-keep-awake"); } catch { /* the screen may sleep while sharing location */ }
+const activateKeepAwakeAsync = (tag: string): Promise<void> => Promise.resolve(KeepAwake?.activateKeepAwakeAsync?.(tag)).then(() => { });
+const deactivateKeepAwake = (tag: string): Promise<void> => Promise.resolve(KeepAwake?.deactivateKeepAwake?.(tag)).then(() => { });
+
 // ---------- Theme (dark + light) ----------
 
 const DARK = {
-  bg: "#0a0b14", card: "#12131f", secondary: "#1a1c2c", border: "#262a3d", track: "#262a3d",
+  bg: "#080910", card: "#0e1019", secondary: "#151827", border: "#262a3d", track: "#262a3d",
   primary: "#2563eb", fg: "#f1f5f9", fg2: "rgba(241,245,249,0.8)", fgSoft: "rgba(241,245,249,0.4)",
   muted: "#566078", danger: "#ef4444", green: "#4ade80", amber: "#f59e0b",
 };
 const LIGHT: typeof DARK = {
-  bg: "#f4f6fb", card: "#ffffff", secondary: "#eceff6", border: "#d9deea", track: "#cbd5e1",
+  bg: "#f4f6fb", card: "#e6eaf3", secondary: "#d9dfec", border: "#c4cbdc", track: "#b9c3d6",
   primary: "#2563eb", fg: "#0f172a", fg2: "rgba(15,23,42,0.8)", fgSoft: "rgba(15,23,42,0.4)",
   muted: "#64748b", danger: "#dc2626", green: "#16a34a", amber: "#b45309",
 };
+// Solid button colours (same in both themes, always white text on top)
+const SOLID = { green: "#16a34a", red: "#dc2626", blue: "#2563eb" };
 // C and s (the styles) are updated in place when the theme changes, then the whole app re-renders (see App).
 const C = { ...DARK };
 let THEME: "dark" | "light" = "dark";
@@ -111,7 +125,10 @@ const Label = ({ children }: { children: string }) => (
 const SUPPORT_EMAIL = "successpercy5@gmail.com";
 const SUPPORT_PHONE = "+27837627597";
 const SUPPORT_WHATSAPP = "+27837627597"; // no + sign
-const SUPPORT_WEBSITE = "https://www.mzanzilift.co.za";
+const SUPPORT_WEBSITE = "https://www.mzanzilift.co.za"; // the privacy and delete-account pages below must be hosted at this address
+const PRIVACY_URL = `https://mzanzilift.netlify.app/index.html`;
+const DELETE_ACCOUNT_URL = `https://mzanzilift2.netlify.app/index.html`;
+const APP_VERSION = Constants.expoConfig?.version ?? "1.0.0";
 
 // ---------- App settings (saved on the phone) ----------
 type PayMethod = "cash" | "card" | "eft";
@@ -201,7 +218,7 @@ if (typeof L === 'undefined') {
   var current = '__INIT__';
   layers[current].addTo(map);
   document.body.className = current === 'light' ? 'lt' : '';
-  var meM = null, pinM = null, drvM = [], lastRecenter = 0, lastFit = 0;
+  var meM = null, pinM = null, drvM = [], routeL = null, lastRecenter = 0, lastFit = 0, lastFocus = 0;
 
   function post(o) { if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify(o)); }
   map.on('click', function (e) { post({ type: 'pin', lat: e.latlng.lat, lng: e.latlng.lng }); });
@@ -219,6 +236,10 @@ if (typeof L === 'undefined') {
         map.setView(ll, 13);
       } else { meM.setLatLng(ll); }
     } else if (meM) { map.removeLayer(meM); meM = null; }
+    if (d.focus && d.focus.key !== lastFocus) {
+      lastFocus = d.focus.key;
+      map.setView([d.focus.pt.latitude, d.focus.pt.longitude], d.focus.zoom);
+    }
     if (d.recenter && d.recenter !== lastRecenter) {
       lastRecenter = d.recenter;
       if (meM) map.setView(meM.getLatLng(), 14);
@@ -229,6 +250,10 @@ if (typeof L === 'undefined') {
         pinM = L.marker(pl, { interactive: false, icon: L.divIcon({ className: '', html: '<div class="pin"></div>', iconSize: [16, 16], iconAnchor: [8, 8] }) }).addTo(map);
       } else { pinM.setLatLng(pl); }
     } else if (pinM) { map.removeLayer(pinM); pinM = null; }
+    if (d.route && d.route.length > 1) {
+      if (!routeL) routeL = L.polyline(d.route, { color: '#3b82f6', weight: 5, opacity: 0.85, lineCap: 'round', lineJoin: 'round' }).addTo(map);
+      else routeL.setLatLngs(d.route);
+    } else if (routeL) { map.removeLayer(routeL); routeL = null; }
     drvM.forEach(function (m) { map.removeLayer(m); });
     drvM = (d.drivers || []).map(function (p) {
       return L.marker([p.latitude, p.longitude], { icon: L.divIcon({ className: '', html: '<div class="drv"><i></i></div>', iconSize: [24, 24], iconAnchor: [12, 12] }) }).addTo(map);
@@ -244,8 +269,8 @@ if (typeof L === 'undefined') {
 }
 </script></body></html>`;
 
-function MapView({ me, drivers = [], pin = null, dark = true, recenterKey = 0, fitKey = 0, onPin }: {
-  me: Pt | null; drivers?: (Pt & { id: string })[]; pin?: Pt | null; dark?: boolean; recenterKey?: number; fitKey?: number; onPin?: (p: Pt) => void;
+function MapView({ me, drivers = [], pin = null, route = null, focus = null, dark = true, recenterKey = 0, fitKey = 0, onPin }: {
+  me: Pt | null; drivers?: (Pt & { id: string })[]; pin?: Pt | null; route?: [number, number][] | null; focus?: { pt: Pt; zoom: number; key: number } | null; dark?: boolean; recenterKey?: number; fitKey?: number; onPin?: (p: Pt) => void;
 }) {
   const webRef = React.useRef<WebView>(null);
   const [ready, setReady] = useState(false);
@@ -256,7 +281,7 @@ function MapView({ me, drivers = [], pin = null, dark = true, recenterKey = 0, f
   );
 
   // Sends your position, the pin and the map style into the page whenever they change
-  const payload = JSON.stringify({ me, drivers, pin, style: dark ? "dark" : "light", recenter: recenterKey, fitKey, bg: C.bg });
+  const payload = JSON.stringify({ me, drivers, pin, route, focus, style: dark ? "dark" : "light", recenter: recenterKey, fitKey, bg: C.bg });
   useEffect(() => {
     if (!ready) return;
     webRef.current?.injectJavaScript(`window.setState && window.setState(${payload}); true;`);
@@ -350,6 +375,126 @@ async function geocodeTown(name: string): Promise<Pt | null> {
   } catch { return null; }
 }
 
+// Road route between two points (free OSRM service, no key). Returns the line to draw plus the real distance and time.
+async function fetchRoute(a: Pt, b: Pt): Promise<{ pts: [number, number][]; km: number; mins: number } | null> {
+  try {
+    const res = await fetch(
+      `https://router.project-osrm.org/route/v1/driving/${a.longitude},${a.latitude};${b.longitude},${b.latitude}?overview=full&geometries=geojson`
+    );
+    if (!res.ok) return null;
+    const r = (await res.json())?.routes?.[0];
+    if (!r?.geometry?.coordinates?.length) return null;
+    let pts = (r.geometry.coordinates as [number, number][]).map(([lng, lat]) => [lat, lng] as [number, number]);
+    if (pts.length > 600) { const step = Math.ceil(pts.length / 600); pts = pts.filter((_, i) => i % step === 0 || i === pts.length - 1); }
+    return { pts, km: r.distance / 1000, mins: Math.max(1, Math.round(r.duration / 60)) };
+  } catch { return null; }
+}
+
+// Finds a street address on the map (free OpenStreetMap search). Returns null if the address is not in the map data.
+async function geocodeAddress(addr: string, town: string): Promise<Pt | null> {
+  try {
+    const wait = lastGeo + 1100 - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastGeo = Date.now();
+    const q = addr.toLowerCase().includes(town.trim().toLowerCase()) ? addr : `${addr}, ${town}`;
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=za&accept-language=en&q=${encodeURIComponent(q + ", South Africa")}`,
+      { headers: { "User-Agent": `MzansiLift/1.0 (${SUPPORT_EMAIL})` } }
+    );
+    if (!res.ok) return null;
+    const hit = (await res.json())?.[0];
+    return hit ? { latitude: Number(hit.lat), longitude: Number(hit.lon) } : null;
+  } catch { return null; }
+}
+
+// Builds a short street address from OpenStreetMap address parts
+function placeLabel(a: any, display?: string): string {
+  const street = [a?.house_number, a?.road].filter(Boolean).join(" ");
+  const out = [street, a?.suburb ?? a?.neighbourhood, a?.city ?? a?.town ?? a?.village].filter(Boolean).join(", ");
+  return out || display || "Pinned location";
+}
+
+// Turns a map point into a street address the rider can check and edit
+async function addressFromPoint(p: Pt): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&addressdetails=1&accept-language=en&lat=${p.latitude}&lon=${p.longitude}`,
+      { headers: { "User-Agent": `MzansiLift/1.0 (${SUPPORT_EMAIL})` } }
+    );
+    if (!res.ok) return null;
+    const j = await res.json();
+    return placeLabel(j.address, j.display_name);
+  } catch { return null; }
+}
+
+// Searches the map for an address and returns up to 6 matches. Run on a button tap (the free service does not allow search-as-you-type).
+async function searchPlaces(q: string, town: string): Promise<{ label: string; pt: Pt }[]> {
+  const run = async (text: string) => {
+    const wait = lastGeo + 1100 - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastGeo = Date.now();
+    const query = text.toLowerCase().includes(town.trim().toLowerCase()) ? text : `${text}, ${town}`;
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&addressdetails=1&countrycodes=za&accept-language=en&q=${encodeURIComponent(query)}`,
+      { headers: { "User-Agent": `MzansiLift/1.0 (${SUPPORT_EMAIL})` } }
+    );
+    if (!res.ok) return [];
+    const rows = (await res.json()) ?? [];
+    return rows.map((h: any) => ({ label: placeLabel(h.address, h.display_name), pt: { latitude: Number(h.lat), longitude: Number(h.lon) } }));
+  };
+  try {
+    let found = await run(q);
+    // House numbers are often missing from the map data: try again without the number to at least find the street
+    const noNumber = q.replace(/^\s*\d+[a-z]?\s+/i, "");
+    if (!found.length && noNumber !== q) found = await run(noNumber);
+    return found;
+  } catch { return []; }
+}
+
+// Address suggestions while typing (Photon, a free OpenStreetMap search made for search-as-you-type, no key needed).
+// Only addresses that exist in the map data come back, nearest to the pickup town first.
+async function suggestPlaces(q: string, near: Pt | null): Promise<{ label: string; pt: Pt }[]> {
+  try {
+    const res = await fetch(
+      `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en${near ? `&lat=${near.latitude}&lon=${near.longitude}` : ""}`
+    );
+    if (!res.ok) return [];
+    const feats: any[] = (await res.json())?.features ?? [];
+    const seen = new Set<string>();
+    const out: { label: string; pt: Pt }[] = [];
+    for (const f of feats) {
+      const p = f.properties ?? {};
+      const c = f.geometry?.coordinates;
+      if (p.countrycode !== "ZA" || !c) continue;
+      const pt = { latitude: Number(c[1]), longitude: Number(c[0]) };
+      if (near && distKm(pt, near) > 60) continue; // a pickup must be near the trip's starting town
+      const street = p.street ?? (p.osm_key === "highway" ? p.name : undefined);
+      const line1 = [p.housenumber, street].filter(Boolean).join(" ");
+      const poi = p.osm_key !== "highway" && p.name && p.name !== street ? p.name : "";
+      const label = Array.from(new Set([poi, line1, p.locality ?? p.district, p.city ?? p.county].filter(Boolean))).join(", ");
+      if (!label || seen.has(label)) continue;
+      seen.add(label);
+      out.push({ label, pt });
+      if (out.length >= 5) break;
+    }
+    return out;
+  } catch { return []; }
+}
+
+// Opens the driver's maps app with turn-by-turn directions to the rider's pickup spot
+function openNavigation(d: { lat?: number | null; lng?: number | null; address?: string | null }) {
+  const hasPt = d.lat != null && d.lng != null;
+  const dest = hasPt ? `${d.lat},${d.lng}` : (d.address ?? "");
+  if (!dest) return;
+  const google = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}&travelmode=driving`;
+  const waze = hasPt ? `https://waze.com/ul?ll=${d.lat},${d.lng}&navigate=yes` : `https://waze.com/ul?q=${encodeURIComponent(d.address ?? "")}&navigate=yes`;
+  Alert.alert("Navigate to pickup", d.address ?? "Pickup point", [
+    { text: "Google Maps", onPress: () => { Linking.openURL(google).catch(() => { }); } },
+    { text: "Waze", onPress: () => { Linking.openURL(waze).catch(() => { }); } },
+    { text: "Cancel", style: "cancel" },
+  ]);
+}
+
 // The server works the fare out from the distance. It already knows many towns; for a town it has never seen,
 // we send that town's map position once and the server remembers it.
 async function quoteFare(o: string, d: string): Promise<{ fare?: number; error?: string; o?: Pt | null; d?: Pt | null }> {
@@ -425,8 +570,8 @@ function SeatIcons({ total, left }: { total: number; left: number }) {
       {Array.from({ length: total }, (_, i) => {
         const free = i < left;
         return (
-          <View key={i} style={[s.seatDot, free ? { borderColor: C.green, backgroundColor: "rgba(74,222,128,0.12)" } : { borderColor: C.border, backgroundColor: C.secondary }]}>
-            <User size={14} color={free ? C.green : C.muted} />
+          <View key={i} style={[s.seatDot, free ? { borderColor: SOLID.green, backgroundColor: SOLID.green } : { borderColor: C.muted, backgroundColor: C.muted }]}>
+            <User size={14} color="#fff" />
           </View>
         );
       })}
@@ -438,8 +583,8 @@ function SeatsBadge({ left, total }: { left: number; total: number }) {
   const full = left <= 0;
   return (
     <T style={[s.booked, full
-      ? { color: C.danger, backgroundColor: "rgba(239,68,68,0.1)", borderColor: "rgba(239,68,68,0.25)" }
-      : { color: C.green, backgroundColor: "rgba(74,222,128,0.1)", borderColor: "rgba(74,222,128,0.25)" }]}>
+      ? { color: "#fff", backgroundColor: SOLID.red, borderColor: SOLID.red, fontWeight: "600" }
+      : { color: "#fff", backgroundColor: SOLID.green, borderColor: SOLID.green, fontWeight: "600" }]}>
       {full ? "Full" : `${left} of ${total} seat${total === 1 ? "" : "s"} left`}
     </T>
   );
@@ -625,8 +770,9 @@ const normalizePhone = (raw: string) => {
 
 // Log in with email + password. New accounts confirm their email and phone with one-time codes.
 function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: boolean; onClose: () => void; initialMode?: "signin" | "signup" }) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [step, setStep] = useState<"form" | "email-code">("form");
+  const [mode, setMode] = useState<"signin" | "signup" | "reset">("signin");
+  const [step, setStep] = useState<"form" | "email-code" | "reset-code">("form");
+  const [newPw, setNewPw] = useState("");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
@@ -639,7 +785,7 @@ function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: bool
   useEffect(() => {
     if (visible) {
       setMode(initialMode); setStep("form");
-      setName(""); setPhone(""); setEmail(""); setPassword(""); setCode(""); setError(""); setCooldown(0);
+      setName(""); setPhone(""); setEmail(""); setPassword(""); setNewPw(""); setCode(""); setError(""); setCooldown(0);
     }
   }, [visible]);
 
@@ -702,10 +848,44 @@ function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: bool
     onClose();
   };
 
-  const title = step === "email-code" ? "Verify your email" : mode === "signin" ? "Log in" : "Create account";
-  const action = step === "form" ? (mode === "signin" ? signIn : signUp) : verifyEmail;
-  const actionLabel = step === "form" ? (mode === "signin" ? "Log in" : "Create account") : "Verify";
-  const resend = sendEmailCode;
+  // Forgot password: we email a one-time code, then the rider picks a new password
+  const sendResetCode = async () => {
+    setError("");
+    if (!email.includes("@")) return setError("Enter the email you signed up with");
+    setBusy(true);
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim());
+    setBusy(false);
+    if (error) return setError(error.message);
+    setCode(""); setNewPw(""); setStep("reset-code"); setCooldown(60);
+  };
+
+  const verifyReset = async () => {
+    setError("");
+    if (code.trim().length < 6) return setError("Enter the code we sent you");
+    if (newPw.length < 6) return setError("New password must be at least 6 characters");
+    setBusy(true);
+    const check = await supabase.auth.verifyOtp({ email: email.trim(), token: code.trim(), type: "recovery" });
+    if (check.error) { setBusy(false); return setError(check.error.message); }
+    const { error } = await supabase.auth.updateUser({ password: newPw });
+    setBusy(false);
+    if (error) return setError(error.message);
+    Alert.alert("Password changed", "You are now logged in. Use your new password next time.");
+    onClose();
+  };
+
+  const title = step === "email-code" ? "Verify your email"
+    : step === "reset-code" ? "Enter your code"
+      : mode === "reset" ? "Reset password"
+        : mode === "signin" ? "Log in" : "Create account";
+  const action = step === "reset-code" ? verifyReset
+    : step === "email-code" ? verifyEmail
+      : mode === "reset" ? sendResetCode
+        : mode === "signin" ? signIn : signUp;
+  const actionLabel = step === "reset-code" ? "Change password"
+    : step === "email-code" ? "Verify"
+      : mode === "reset" ? "Send code"
+        : mode === "signin" ? "Log in" : "Create account";
+  const resend = step === "reset-code" ? sendResetCode : sendEmailCode;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -720,12 +900,32 @@ function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: bool
               <Pressable onPress={onClose}><X size={18} color={C.muted} /></Pressable>
             </View>
 
-            {step === "form" ? (
+            {step === "form" && mode === "reset" ? (
+              <>
+                <T style={[s.muted, { fontSize: 14, lineHeight: 20, marginBottom: 16 }]}>
+                  Enter the email you signed up with and we'll send you a code to set a new password.
+                </T>
+                <Field label="Email" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" autoFocus />
+              </>
+            ) : step === "form" ? (
               <>
                 {mode === "signup" && <Field label="Full name" value={name} onChangeText={setName} />}
                 <Field label="Email" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
                 {mode === "signup" && <Field label="Phone number" value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="082 123 4567" />}
                 <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+                {mode === "signin" && (
+                  <Pressable onPress={() => { setMode("reset"); setError(""); }} style={{ alignSelf: "flex-end", marginBottom: 12 }} hitSlop={8}>
+                    <T style={{ color: C.primary, fontSize: 13 }}>Forgot password?</T>
+                  </Pressable>
+                )}
+              </>
+            ) : step === "reset-code" ? (
+              <>
+                <T style={[s.muted, { fontSize: 14, lineHeight: 20, marginBottom: 16 }]}>
+                  {`If ${email.trim()} has an account, we sent it a code. Enter the code and choose a new password.`}
+                </T>
+                <Field label="Code" value={code} onChangeText={setCode} keyboardType="number-pad" maxLength={10} autoFocus />
+                <Field label="New password" value={newPw} onChangeText={setNewPw} secureTextEntry autoCapitalize="none" />
               </>
             ) : (
               <>
@@ -750,7 +950,12 @@ function AuthModal({ visible, onClose, initialMode = "signin" }: { visible: bool
                 </Pressable>
               </View>
             )}
-            {step === "form" && (
+            {step === "form" && mode === "reset" && (
+              <Pressable onPress={() => { setMode("signin"); setError(""); }} style={{ alignItems: "center", marginTop: 16 }}>
+                <T style={{ color: C.primary }}>Back to log in</T>
+              </Pressable>
+            )}
+            {step === "form" && mode !== "reset" && (
               <Pressable onPress={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); }} style={{ alignItems: "center", marginTop: 16 }}>
                 <T style={{ color: C.primary }}>{mode === "signin" ? "New here? Create an account" : "Already have an account? Log in"}</T>
               </Pressable>
@@ -998,9 +1203,9 @@ function ManageAccountModal({ visible, onClose }: { visible: boolean; onClose: (
               <ChevronRight size={15} color={C.muted} />
             </Pressable>
 
-            <Pressable onPress={deleteAccount} disabled={busy} style={[s.card, s.row, { marginTop: 32, borderColor: "rgba(239,68,68,0.3)" }]}>
-              <Trash2 size={16} color={C.danger} />
-              <T style={{ marginLeft: 12, color: C.danger, fontWeight: "500" }}>Delete account</T>
+            <Pressable onPress={deleteAccount} disabled={busy} style={[s.card, s.row, s.solidRed, { marginTop: 32, justifyContent: "center" }]}>
+              <Trash2 size={16} color="#fff" />
+              <T style={{ marginLeft: 12, color: "#fff", fontWeight: "600" }}>Delete account</T>
             </Pressable>
           </ScrollView>
         </KeyboardAvoidingView>
@@ -1266,6 +1471,8 @@ function InfoModal({ kind, onClose }: { kind: string | null; onClose: () => void
         "We don't sell your personal information.",
         "You can edit your details or delete your account in Account, then Manage Account. Deleting removes your account, trips and driver profile.",
       ]} />
+      <ActionRow icon={Shield} label="Privacy policy" sub="Read the full policy online" onPress={() => Linking.openURL(PRIVACY_URL).catch(() => Alert.alert("Could not open the page", "Check your internet connection and try again."))} />
+      <ActionRow icon={Trash2} label="Delete your account" sub="How to delete your account and data" onPress={() => Linking.openURL(DELETE_ACCOUNT_URL).catch(() => Alert.alert("Could not open the page", "Check your internet connection and try again."))} />
       <Para>Questions about your information? Email {SUPPORT_EMAIL}.</Para>
     </>
   );
@@ -1278,7 +1485,7 @@ function InfoModal({ kind, onClose }: { kind: string | null; onClose: () => void
       <ActionRow
         icon={Globe}
         label="Visit our website"
-        sub="www.mzansilift.co.za"
+        sub={SUPPORT_WEBSITE.replace(/^https?:\/\//, "")}
         onPress={() =>
           Linking.openURL(SUPPORT_WEBSITE).catch(() => Alert.alert("Could not open website", "Please check your internet connection and try again."))
         }
@@ -1291,7 +1498,7 @@ function InfoModal({ kind, onClose }: { kind: string | null; onClose: () => void
       <Para>MzansiLift connects people travelling between South African towns with drivers who have seats to share, so long trips are easier and cheaper.</Para>
       <Para>Drivers post their trips ahead of time. Riders pick a driver going their way, request a seat and travel together. We set the fare per seat so it's the same for everyone.</Para>
       <Para>We're starting in Gauteng and Limpopo and growing across the country.</Para>
-      <T mono style={[s.muted, { marginTop: 8 }]}>MzansiLift v1.0.0 · South Africa</T>
+      <T mono style={[s.muted, { marginTop: 8 }]}>MzansiLift v{APP_VERSION} · South Africa</T>
     </>
   );
 
@@ -1313,7 +1520,107 @@ function InfoModal({ kind, onClose }: { kind: string | null; onClose: () => void
 // All of it runs through database functions (see chat_and_tracking.sql), so only the rider and the driver of a booking can use it.
 type ChatMsg = { msg_id: string; body: string; created_at: string; mine: boolean; from_driver: boolean };
 
+// ---------- Safety: report and block ----------
+// Reports and blocks go through database functions (see safety_reports_blocks.sql). Both are tied to a booking, so you can only
+// report or block the person you share a trip with.
+let BLOCKED = new Set<string>(); // booking ids whose other person you have blocked
+const blockedListeners = new Set<() => void>();
+const setBlocked = (ids: string[]) => { BLOCKED = new Set(ids); blockedListeners.forEach((f) => f()); };
+async function loadBlocked() {
+  const { data, error } = await supabase.rpc("my_blocked_bookings");
+  if (!error) setBlocked((data ?? []) as string[]);
+}
+function useBlockedBookings() {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const f = () => setTick((t) => t + 1);
+    blockedListeners.add(f);
+    return () => { blockedListeners.delete(f); };
+  }, []);
+  return BLOCKED;
+}
+async function blockBooking(id: string) {
+  const { error } = await supabase.rpc("block_user", { p_booking: id });
+  if (error) Alert.alert("Could not block", error.message);
+  await loadBlocked();
+}
+async function unblockBooking(id: string) {
+  const { error } = await supabase.rpc("unblock_user", { p_booking: id });
+  if (error) Alert.alert("Could not unblock", error.message);
+  await loadBlocked();
+}
+const confirmBlock = (id: string, name: string) =>
+  Alert.alert(`Block ${name}?`, "Their messages will be hidden from you in the chat and in your Inbox. You can unblock them later from the chat.", [
+    { text: "Cancel", style: "cancel" },
+    { text: "Block", style: "destructive", onPress: () => { blockBooking(id); } },
+  ]);
+
+const REPORT_REASONS = [
+  { id: "harassment", label: "Harassment or abuse" },
+  { id: "unsafe", label: "Unsafe driving or behaviour" },
+  { id: "fake", label: "Fake or misleading" },
+  { id: "no_show", label: "No-show or last-minute cancel" },
+  { id: "other", label: "Something else" },
+];
+
+function ReportModal({ bookingId, name, onClose }: { bookingId: string | null; name: string; onClose: () => void }) {
+  const [reason, setReason] = useState<string | null>(null);
+  const [details, setDetails] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { if (bookingId) { setReason(null); setDetails(""); setError(""); setBusy(false); } }, [bookingId]);
+
+  const send = async () => {
+    if (!bookingId) return;
+    if (!reason) return setError("Choose what happened.");
+    setBusy(true); setError("");
+    const { error } = await supabase.rpc("report_user", { p_booking: bookingId, p_reason: reason, p_details: details.trim() || null });
+    setBusy(false);
+    if (error) return setError(error.message);
+    const id = bookingId;
+    onClose();
+    Alert.alert("Report sent", "Thank you. We review every report. If you are in danger, call 10111 or 112 now.", [
+      { text: "Done", style: "cancel" },
+      { text: `Also block ${name}`, onPress: () => { blockBooking(id); } },
+    ]);
+  };
+
+  return (
+    <Modal visible={!!bookingId} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+        <View style={[s.card, { borderRadius: 24, maxHeight: "90%" }]}>
+          <ScrollView contentContainerStyle={{ padding: 24 }} keyboardShouldPersistTaps="handled">
+            <View style={[s.row, { justifyContent: "space-between", marginBottom: 8 }]}>
+              <T style={{ fontWeight: "600", fontSize: 18 }}>Report {name}</T>
+              <Pressable onPress={onClose}><X size={18} color={C.muted} /></Pressable>
+            </View>
+            <T style={[s.muted, { fontSize: 13, lineHeight: 19, marginBottom: 16 }]}>
+              Tell us what happened. Only our team sees your report, and {name} is not told who reported them.
+            </T>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+              {REPORT_REASONS.map((r) => (
+                <Pressable key={r.id} onPress={() => setReason(r.id)} style={[s.dateChip, reason === r.id && s.dateChipOn]}>
+                  <T style={[s.dateTxt, reason === r.id && { color: "#fff" }]}>{r.label}</T>
+                </Pressable>
+              ))}
+            </View>
+            <Field label="Details (optional)" value={details} onChangeText={setDetails} multiline maxLength={1000} placeholder="What happened?" />
+            {!!error && <T style={{ color: C.danger, fontSize: 12, marginBottom: 12 }}>{error}</T>}
+            <Pressable onPress={send} disabled={busy} style={[s.primaryBtn, busy && { opacity: 0.6 }]}>
+              <T style={s.primaryTxt}>{busy ? "Sending..." : "Send report"}</T>
+            </Pressable>
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 function ChatModal({ bookingId, title, onClose }: { bookingId: string | null; title: string; onClose: () => void }) {
+  const { markSeen } = React.useContext(InboxCtx);
+  const blockedSet = useBlockedBookings();
+  const blocked = !!bookingId && blockedSet.has(bookingId);
+  const [reporting, setReporting] = useState(false);
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1324,13 +1631,22 @@ function ChatModal({ bookingId, title, onClose }: { bookingId: string | null; ti
     if (!bookingId) return;
     const { data, error } = await supabase.rpc("get_trip_messages", { p_booking: bookingId });
     if (error) { setError(error.message); return; }
-    setError(""); setMsgs((data ?? []) as ChatMsg[]);
+    const list = (data ?? []) as ChatMsg[];
+    setError(""); setMsgs(list);
+    // The chat is open, so everything up to the newest message counts as read in the Inbox
+    if (list.length) markSeen(bookingId, list.reduce((a, m) => (new Date(m.created_at) > new Date(a) ? m.created_at : a), list[0].created_at));
   };
+  const chRef = React.useRef<ReturnType<typeof supabase.channel> | null>(null);
   useEffect(() => {
     if (!bookingId) { setMsgs([]); setText(""); setError(""); return; }
     load();
-    const t = setInterval(load, 4000); // new messages appear within a few seconds
-    return () => clearInterval(t);
+    // Realtime: the other person's phone sends a "ping" the moment a message is sent, and we reload through the
+    // secured get_trip_messages function (so the ping carries no data and can't leak anything).
+    const ch = supabase.channel(`chat:${bookingId}`);
+    ch.on("broadcast", { event: "ping" }, () => { load(); }).subscribe();
+    chRef.current = ch;
+    const t = setInterval(load, 15000); // slow safety net in case a ping is missed
+    return () => { clearInterval(t); chRef.current = null; supabase.removeChannel(ch); };
   }, [bookingId]);
 
   const send = async () => {
@@ -1341,7 +1657,19 @@ function ChatModal({ bookingId, title, onClose }: { bookingId: string | null; ti
     setBusy(false);
     if (error) return setError(error.message);
     setText("");
+    chRef.current?.send({ type: "broadcast", event: "ping", payload: {} });
     await load();
+  };
+
+  const openMenu = () => {
+    if (!bookingId) return;
+    Alert.alert(title, undefined, [
+      { text: "Report", onPress: () => setReporting(true) },
+      blocked
+        ? { text: "Unblock", onPress: () => { unblockBooking(bookingId); } }
+        : { text: "Block", style: "destructive" as const, onPress: () => confirmBlock(bookingId, title) },
+      { text: "Cancel", style: "cancel" as const },
+    ]);
   };
 
   return (
@@ -1352,7 +1680,17 @@ function ChatModal({ bookingId, title, onClose }: { bookingId: string | null; ti
           <View style={[s.row, { padding: 16 }]}>
             <Pressable onPress={onClose} style={s.roundBtn}><ChevronLeft size={18} color={C.fg} /></Pressable>
             <T style={{ fontWeight: "600", fontSize: 18, marginLeft: 12, flex: 1 }} numberOfLines={1}>{title}</T>
+            <Pressable onPress={openMenu} style={s.roundBtn} accessibilityLabel="Report or block"><Flag size={16} color={C.muted} /></Pressable>
           </View>
+          {blocked ? (
+            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 32 }}>
+              <T style={{ fontWeight: "600", marginBottom: 6 }}>You blocked {title}</T>
+              <T style={[s.muted, { textAlign: "center", lineHeight: 18, marginBottom: 16 }]}>Their messages are hidden. Unblock them to see the chat again.</T>
+              <Pressable onPress={() => { if (bookingId) unblockBooking(bookingId); }} style={[s.primaryBtn, { paddingHorizontal: 32 }]}>
+                <T style={s.primaryTxt}>Unblock</T>
+              </Pressable>
+            </View>
+          ) : (<>
           <ScrollView
             ref={scrollRef}
             contentContainerStyle={{ padding: 16, paddingTop: 4, gap: 8 }}
@@ -1393,7 +1731,9 @@ function ChatModal({ bookingId, title, onClose }: { bookingId: string | null; ti
               <ArrowRight size={18} color="#fff" />
             </Pressable>
           </View>
+          </>)}
         </KeyboardAvoidingView>
+        <ReportModal bookingId={reporting ? bookingId : null} name={title} onClose={() => setReporting(false)} />
       </SafeAreaView>
     </Modal>
   );
@@ -1407,6 +1747,10 @@ function useShareLocation(tripId: string | null) {
     let cancelled = false;
     let sub: Location.LocationSubscription | undefined;
     let last = 0;
+    // Keep the screen on while sharing, otherwise the phone sleeps and the location stops updating
+    activateKeepAwakeAsync("mzl-share-location").catch(() => { });
+    const ch = supabase.channel(`track:${tripId}`);
+    ch.subscribe();
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted" || cancelled) return;
@@ -1415,12 +1759,13 @@ function useShareLocation(tripId: string | null) {
         ({ coords }) => {
           if (Date.now() - last < 5000) return;
           last = Date.now();
-          supabase.rpc("update_driver_location", { p_trip: tripId, p_lat: coords.latitude, p_lng: coords.longitude }).then(() => { });
+          supabase.rpc("update_driver_location", { p_trip: tripId, p_lat: coords.latitude, p_lng: coords.longitude })
+            .then(({ error }) => { if (!error) ch.send({ type: "broadcast", event: "ping", payload: {} }); }); // tells the rider's map to move now
         }
       );
       if (cancelled) w.remove(); else sub = w;
     })();
-    return () => { cancelled = true; sub?.remove(); };
+    return () => { cancelled = true; sub?.remove(); deactivateKeepAwake("mzl-share-location").catch(() => { }); supabase.removeChannel(ch); };
   }, [tripId]);
 }
 
@@ -1444,13 +1789,23 @@ function TrackModal({ booking, onClose, onMessage }: { booking: MyBooking | null
   const [error, setError] = useState("");
   const [, setTick] = useState(0);
   const fitted = React.useRef(false);
+  const [route, setRoute] = useState<{ pts: [number, number][]; km: number; mins: number } | null>(null);
+  const lastRoute = React.useRef<{ at: number; pt: Pt } | null>(null);
+  const routeReq = React.useRef(0);
   const bid = booking?.booking_id;
 
   useEffect(() => {
     fitted.current = false;
     if (!bid || !booking) { setFix(undefined); setFrom(null); setError(""); return; }
     let off = false;
-    geocodeTown(booking.origin).then((p) => { if (!off) setFrom(p); });
+    // Use the rider's exact pickup spot when they gave one, otherwise the middle of the origin town
+    (async () => {
+      const { data } = await supabase.from("bookings").select("pickup_lat, pickup_lng").eq("id", bid).maybeSingle();
+      if (off) return;
+      if (data?.pickup_lat != null && data?.pickup_lng != null) { setFrom({ latitude: Number(data.pickup_lat), longitude: Number(data.pickup_lng) }); return; }
+      const p = await geocodeTown(booking.origin);
+      if (!off) setFrom(p);
+    })();
     const load = async () => {
       const { data, error } = await supabase.rpc("get_driver_location", { p_booking: bid });
       if (off) return;
@@ -1460,17 +1815,34 @@ function TrackModal({ booking, onClose, onMessage }: { booking: MyBooking | null
       setTick((n) => n + 1);
     };
     load();
-    const t = setInterval(load, 6000);
-    return () => { off = true; clearInterval(t); };
+    // Realtime: the driver's phone pings after every location update, so the car moves on the map straight away
+    const ch = supabase.channel(`track:${booking.trip_id}`);
+    ch.on("broadcast", { event: "ping" }, () => { load(); }).subscribe();
+    const t = setInterval(load, 15000); // slow safety net
+    return () => { off = true; clearInterval(t); supabase.removeChannel(ch); };
   }, [bid]);
 
   const live = !!fix && fix.sharing && Date.now() - new Date(fix.updated_at).getTime() < 2 * 60 * 1000;
   const driverPt: Pt | null = fix ? { latitude: fix.lat, longitude: fix.lng } : null;
-  const km = live && driverPt && from ? distKm(driverPt, from) : null;
-  const mins = km == null ? null : Math.max(1, Math.round((km / 50) * 60)); // rough: 50 km/h average
+  const straightKm = live && driverPt && from ? distKm(driverPt, from) : null;
+  const useRoute = live && !!route;
+  const km = useRoute ? route!.km : straightKm;
+  const mins = km == null ? null : useRoute ? route!.mins : Math.max(1, Math.round((km / 50) * 60)); // road time when known, otherwise a rough 50 km/h guess
 
   useEffect(() => {
     if (driverPt && from && !fitted.current) { fitted.current = true; setFitKey((k) => k + 1); }
+  }, [fix, from]);
+
+  // Draws the road route from the driver to the pickup, redrawn as the driver moves (not more than every 8s)
+  useEffect(() => {
+    const isLive = !!fix && fix.sharing && Date.now() - new Date(fix.updated_at).getTime() < 2 * 60 * 1000;
+    if (!isLive || !fix || !from) { routeReq.current++; setRoute(null); lastRoute.current = null; return; }
+    const pt = { latitude: fix.lat, longitude: fix.lng };
+    const prev = lastRoute.current;
+    if (prev && (Date.now() - prev.at < 8000 || distKm(prev.pt, pt) < 0.1)) return;
+    lastRoute.current = { at: Date.now(), pt };
+    const id = ++routeReq.current; // only the newest answer is used
+    fetchRoute(pt, from).then((r) => { if (id === routeReq.current && r) setRoute(r); });
   }, [fix, from]);
 
   return (
@@ -1488,6 +1860,7 @@ function TrackModal({ booking, onClose, onMessage }: { booking: MyBooking | null
                 me={null}
                 drivers={driverPt ? [{ id: "driver", ...driverPt }] : []}
                 pin={from}
+                route={useRoute ? route!.pts : null}
                 dark={THEME === "dark"}
                 fitKey={fitKey}
               />
@@ -1557,7 +1930,7 @@ function TrackModal({ booking, onClose, onMessage }: { booking: MyBooking | null
 // ---------- Driver side ----------
 
 type DriverProfile = { id: string; full_name: string; phone: string; vehicle: string; plate: string; car_seats: number; rating: number; trips: number };
-type TripBooking = { id: string; rider_name: string; rider_phone: string | null; seats: number; payment_method?: string | null; status: "pending" | "accepted" | "declined" | "cancelled" };
+type TripBooking = { id: string; rider_name: string; rider_phone: string | null; seats: number; payment_method?: string | null; status: "pending" | "accepted" | "declined" | "cancelled"; pickup_address?: string | null; pickup_lat?: number | null; pickup_lng?: number | null };
 type MyTrip = {
   id: string; origin: string; destination: string; depart_at: string; price: number | null; seats_total: number;
   notes: string | null; status: "open" | "cancelled" | "completed"; bookings: TripBooking[];
@@ -1920,8 +2293,8 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
   const approved = docStatus === "approved";
   const notApprovedMsg = docStatus === "pending" ? "Your documents are still under review. You can post trips once they are approved."
     : docStatus === "rejected" ? `Your documents were rejected, so you can't post trips. Email ${SUPPORT_EMAIL} for help.`
-    : docStatus === "none" ? "Submit your driver's licence and car photo (Account → Be a driver). You can post trips once they are approved."
-    : "Checking your approval status. Try again in a moment.";
+      : docStatus === "none" ? "Submit your driver's licence and car photo (Account → Be a driver). You can post trips once they are approved."
+        : "Checking your approval status. Try again in a moment.";
 
   const openPost = (req?: TripRequest) => {
     if (!approved) return Alert.alert("Approval needed", notApprovedMsg);
@@ -2085,8 +2458,8 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                 <T style={{ fontWeight: "600" }} numberOfLines={1}>{profile.vehicle}</T>
                 <T mono style={[s.muted, { marginTop: 2 }]}>{profile.plate} · {plural(profile.car_seats, "seat")}</T>
               </View>
-              <Pressable onPress={onEditProfile} style={[s.cancelPill, { borderColor: C.border }]}>
-                <T style={{ fontSize: 12, color: C.muted }}>Details</T>
+              <Pressable onPress={onEditProfile} style={[s.cancelPill, s.pillNeutral]}>
+                <T style={[s.pillTxt, { color: C.fg }]}>Details</T>
               </Pressable>
             </View>
             <View style={s.statsRow}>
@@ -2115,9 +2488,9 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
               <T style={{ flex: 1, marginLeft: 12, lineHeight: 19 }}>{notApprovedMsg}</T>
             </View>
           )}
-          <Pressable onPress={() => openPost()} style={[s.primaryBtn, { flexDirection: "row", marginBottom: hasOpenTrip ? 8 : 24 }, (hasOpenTrip || !approved) && { opacity: 0.45 }]}>
+          <Pressable onPress={() => openPost()} style={[s.primaryBtn, { flexDirection: "row", marginBottom: hasOpenTrip ? 8 : 24, backgroundColor: SOLID.blue }, (hasOpenTrip || !approved) && { opacity: 0.6 }]}>
             <Plus size={16} color="#fff" />
-            <T style={[s.primaryTxt, { marginLeft: 8 }]}>Post a trip</T>
+            <T style={[s.primaryTxt, { marginLeft: 8, fontWeight: "600" }]}>Post a trip</T>
           </Pressable>
           {hasOpenTrip && (
             <T style={[s.muted, { fontSize: 12, lineHeight: 17, marginBottom: 24 }]}>
@@ -2134,8 +2507,8 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                     <T style={{ fontWeight: "500" }} numberOfLines={1}>{r.origin || "Anywhere"} → {r.destination}</T>
                     <T style={s.muted}>{requestWhen(r)} · {plural(r.seats, "seat")}</T>
                   </View>
-                  <Pressable onPress={() => openPost(r)} style={[s.cancelPill, { borderColor: "rgba(37,99,235,0.4)" }, (hasOpenTrip || !approved) && { opacity: 0.4 }]}>
-                    <T style={{ fontSize: 12, color: C.primary }}>Post trip</T>
+                  <Pressable onPress={() => openPost(r)} style={[s.cancelPill, s.pillBlue, (hasOpenTrip || !approved) && { opacity: 0.4 }]}>
+                    <T style={s.pillTxt}>Post trip</T>
                   </Pressable>
                 </View>
               ))}
@@ -2181,26 +2554,32 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                         <T style={s.muted}>
                           {plural(b.seats, "seat")} · {payName(b.payment_method)}{b.status === "accepted" && b.rider_phone ? ` · ${b.rider_phone}` : ""}
                         </T>
+                        {b.status === "accepted" && !!b.pickup_address && (
+                          <Pressable onPress={() => openNavigation({ lat: b.pickup_lat, lng: b.pickup_lng, address: b.pickup_address })} style={[s.row, { marginTop: 6 }]}>
+                            <Navigation size={12} color={C.primary} />
+                            <T style={{ color: C.primary, marginLeft: 6, fontSize: 12, flexShrink: 1 }} numberOfLines={2}>{b.pickup_address} · Navigate</T>
+                          </Pressable>
+                        )}
                       </View>
                       {b.status === "pending" ? (
                         <View style={[s.row, { gap: 8 }]}>
                           <Pressable onPress={() => respond(b.id, false)} style={s.cancelPill}>
-                            <T style={{ fontSize: 12, color: C.danger }}>Decline</T>
+                            <T style={s.pillTxt}>Decline</T>
                           </Pressable>
                           <Pressable
                             onPress={() => respond(b.id, true)}
                             disabled={!fits}
-                            style={[s.cancelPill, { borderColor: "rgba(74,222,128,0.3)" }, !fits && { opacity: 0.35 }]}
+                            style={[s.cancelPill, s.pillGreen, !fits && { opacity: 0.35 }]}
                           >
-                            <T style={{ fontSize: 12, color: C.green }}>{fits ? "Accept" : "No room"}</T>
+                            <T style={s.pillTxt}>{fits ? "Accept" : "No room"}</T>
                           </Pressable>
                         </View>
                       ) : (
                         <View style={[s.row, { gap: 8 }]}>
-                          <Pressable onPress={() => setChat({ id: b.id, title: b.rider_name })} style={s.roundBtn}>
-                            <MessageCircle size={16} color={C.primary} />
+                          <Pressable onPress={() => setChat({ id: b.id, title: b.rider_name })} style={s.roundBtnBlue}>
+                            <MessageCircle size={16} color="#fff" />
                           </Pressable>
-                          <T style={[s.booked, { color: C.green, backgroundColor: "rgba(74,222,128,0.1)", borderColor: "rgba(74,222,128,0.25)" }]}>Confirmed</T>
+                          <T style={[s.booked, { color: "#fff", backgroundColor: SOLID.green, borderColor: SOLID.green, fontWeight: "600" }]}>Confirmed</T>
                         </View>
                       )}
                     </View>
@@ -2212,10 +2591,10 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                     <View style={[s.row, { justifyContent: "space-between", marginTop: 12 }]}>
                       <View style={[s.row, { flex: 1, paddingRight: 8 }]}>
                         <Navigation size={14} color={C.green} />
-                        <T style={{ color: C.green, marginLeft: 8, flexShrink: 1 }}>Riders can see you coming</T>
+                        <T style={{ color: C.green, marginLeft: 8, flexShrink: 1, }}>Riders can see you coming</T>
                       </View>
                       <Pressable onPress={() => stopSharing(t)} style={s.cancelPill}>
-                        <T style={{ fontSize: 12, color: C.danger }}>Stop</T>
+                        <T style={s.pillTxt}>Stop</T>
                       </Pressable>
                     </View>
                   ) : (
@@ -2227,11 +2606,11 @@ function DriverScreen({ onEditProfile, refreshKey }: { onEditProfile: () => void
                 )}
 
                 <View style={[s.row, s.cardFoot, { marginTop: 12 }]}>
-                  <Pressable onPress={() => completeTrip(t)} style={[s.cancelPill, { borderColor: "rgba(74,222,128,0.3)" }]}>
-                    <T style={{ fontSize: 12, color: C.green }}>Mark completed</T>
+                  <Pressable onPress={() => completeTrip(t)} style={[s.cancelPill, s.pillGreen]}>
+                    <T style={s.pillTxt}>Mark completed</T>
                   </Pressable>
                   <Pressable onPress={() => cancelTrip(t)} style={s.cancelPill}>
-                    <T style={{ fontSize: 12, color: C.danger }}>Cancel trip</T>
+                    <T style={s.pillTxt}>Cancel trip</T>
                   </Pressable>
                 </View>
               </View>
@@ -2270,7 +2649,7 @@ function WelcomeScreen({ onLogin, onSignup, onGuest }: { onLogin: () => void; on
           resizeMode="contain"
         />
 
-        <T style={[s.muted, { fontSize: 14, marginTop: 8 }]}> ride sharing platform, door to door</T>
+        <T style={[s.muted, { fontSize: 14, marginTop: 8 }]}>Ride sharing platform, door to door</T>
       </View>
       <View style={{ gap: 12, paddingBottom: 16 }}>
         <Pressable onPress={onSignup} style={s.primaryBtn}>
@@ -2391,17 +2770,144 @@ function useTripSearch(active: boolean, from: string, to: string, day: Date | nu
   return { trips, loading, err };
 }
 
+// Full-screen pickup picker: search an address, tap the map to drop the pin on the exact spot, or use GPS
+type PickupResult = { address: string; pt: Pt | null };
+function PickupPickerView({ town, initial, onCancel, onDone }: { town: string; initial: PickupResult; onCancel: () => void; onDone: (r: PickupResult) => void }) {
+  const [text, setText] = useState(initial.address);
+  const [pt, setPt] = useState<Pt | null>(initial.pt);
+  const [results, setResults] = useState<{ label: string; pt: Pt }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [typed, setTyped] = useState(false); // true only while the rider is typing (not when we fill the text ourselves)
+  const [townPt, setTownPt] = useState<Pt | null>(null);
+  const [focus, setFocus] = useState<{ pt: Pt; zoom: number; key: number } | null>(null);
+  const focusTo = (p: Pt, zoom: number) => setFocus({ pt: p, zoom, key: Date.now() });
+
+  useEffect(() => {
+    let off = false;
+    if (initial.pt) focusTo(initial.pt, 17);
+    geocodeTown(town).then((p) => { // the town is used to rank suggestions and to start the map there
+      if (off || !p) return;
+      setTownPt(p);
+      if (!initial.pt) focusTo(p, 13);
+    });
+    return () => { off = true; };
+  }, []);
+
+  // Suggestions appear as the rider types (after a short pause), nearest to the pickup town first
+  useEffect(() => {
+    if (!typed) return;
+    const q = text.trim();
+    if (q.length < 3) { setResults([]); return; }
+    let off = false;
+    const t = setTimeout(async () => {
+      setBusy(true);
+      const found = await suggestPlaces(q, townPt);
+      if (off) return;
+      setBusy(false);
+      setResults(found);
+      setNote(found.length ? "" : "No matching address yet. Keep typing, or tap the map to drop the pin.");
+    }, 450);
+    return () => { off = true; clearTimeout(t); };
+  }, [text, typed, townPt]);
+
+  const search = async () => {
+    const q = text.trim();
+    if (q.length < 3) return setNote("Type the street and suburb, then tap Search.");
+    setBusy(true); setNote(""); setResults([]);
+    const found = await searchPlaces(q, town);
+    setBusy(false);
+    if (!found.length) return setNote("We couldn't find that address on the map. Tap the map to drop the pin on your exact spot instead.");
+    setResults(found);
+  };
+  const choose = (r: { label: string; pt: Pt }) => { setTyped(false); setText(r.label); setPt(r.pt); setResults([]); setNote(""); focusTo(r.pt, 17); };
+  const onMapTap = async (p: Pt) => {
+    setPt(p); setResults([]); setNote("");
+    const a = await addressFromPoint(p);
+    if (a) { setTyped(false); setText(a); }
+  };
+  const useGps = async () => {
+    setBusy(true); setNote(""); setResults([]);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") { setNote("Allow location access to use your current spot, or tap the map."); return; }
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      const p = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+      setPt(p); focusTo(p, 17);
+      setTyped(false);
+      setText((await addressFromPoint(p)) ?? "My current location");
+    } catch { setNote("Could not get your location. Search the address or tap the map instead."); }
+    finally { setBusy(false); }
+  };
+  const done = () => {
+    const a = text.trim();
+    if (!pt) return setNote("Pick one of the suggested addresses, or tap the map, so we know the spot is real.");
+    onDone({ address: a || "Pinned location", pt });
+  };
+
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <View style={[s.row, { padding: 16, paddingBottom: 8 }]}>
+          <Pressable onPress={onCancel} style={s.roundBtn}><ChevronLeft size={18} color={C.fg} /></Pressable>
+          <T style={{ fontWeight: "600", fontSize: 18, marginLeft: 12 }}>Pickup spot</T>
+        </View>
+        <View style={{ paddingHorizontal: 16 }}>
+          <View style={[s.row, { backgroundColor: C.secondary, borderRadius: 12, borderWidth: 1, borderColor: C.border, paddingHorizontal: 12 }]}>
+            <MapPin size={16} color={C.primary} />
+            <TextInput
+              value={text} onChangeText={(v) => { setText(v); setTyped(true); setPt(null); }} placeholder="Start typing your address" placeholderTextColor={C.muted}
+              style={s.input} returnKeyType="search" onSubmitEditing={search} autoCapitalize="words"
+            />
+            <Pressable onPress={search} disabled={busy}>
+              <T style={{ color: C.primary, fontWeight: "600", marginLeft: 8, opacity: busy ? 0.5 : 1 }}>{busy ? "..." : "Search"}</T>
+            </Pressable>
+          </View>
+          {!!note && <T style={[s.muted, { fontSize: 12, marginTop: 8 }]}>{note}</T>}
+          {results.length > 0 && (
+            <View style={[s.card, { marginTop: 8, padding: 0, maxHeight: 190, overflow: "hidden" }]}>
+              <ScrollView keyboardShouldPersistTaps="handled">
+                {results.map((r, i) => (
+                  <Pressable key={i} onPress={() => choose(r)} style={{ padding: 12, borderTopWidth: i ? 1 : 0, borderTopColor: C.border }}>
+                    <T numberOfLines={2}>{r.label}</T>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          )}
+          <Pressable onPress={useGps} disabled={busy} style={[s.row, { marginTop: 10 }, busy && { opacity: 0.5 }]}>
+            <Navigation size={13} color={C.primary} />
+            <T style={{ color: C.primary, marginLeft: 6, fontSize: 13 }}>Use my current location</T>
+          </Pressable>
+        </View>
+        <View style={{ flex: 1, margin: 16, borderRadius: 16, overflow: "hidden", borderWidth: 1, borderColor: C.border }}>
+          <MapView me={null} pin={pt} dark={THEME === "dark"} focus={focus} onPin={onMapTap} />
+        </View>
+        <View style={{ paddingHorizontal: 16, paddingBottom: 16 }}>
+          <T style={[s.muted, { fontSize: 12, textAlign: "center" }]}>
+            {pt ? "Pin placed. Tap the map to move it to your exact gate or house." : "Choose a suggestion above, or tap the map to drop the pin."}
+          </T>
+          <Pressable onPress={done} style={[s.primaryBtn, { marginTop: 10 }]}><T style={s.primaryTxt}>Confirm pickup spot</T></Pressable>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
 // Trip details + "request seats" sheet
 function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onClose: () => void; onRequested: () => void }) {
   const { user, openAuth } = React.useContext(AuthCtx);
   const { settings } = React.useContext(SettingsCtx);
   const [seats, setSeats] = useState(1);
   const [pay, setPay] = useState<PayMethod>(settings.payment);
+  const [pickup, setPickup] = useState("");
+  const [pickupPt, setPickupPt] = useState<Pt | null>(null); // exact spot picked on the map or from GPS
+  const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const left = trip?.seats_left ?? 0;
 
-  useEffect(() => { setSeats(1); setError(""); setPay(settings.payment); }, [trip?.id]);
+  useEffect(() => { setSeats(1); setError(""); setPay(settings.payment); setPickup(""); setPickupPt(null); setPicking(false); }, [trip?.id]);
   useEffect(() => { if (seats > left) setSeats(Math.max(1, left)); }, [left]);
 
   const request = async () => {
@@ -2413,18 +2919,31 @@ function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onCl
       ]);
       return;
     }
+    const addr = pickup.trim() || (pickupPt ? "Pinned location" : "");
+    if (addr.length < 5 && !pickupPt) return setError("Choose your pickup spot so the driver can find you.");
     setBusy(true); setError("");
+    const pt = pickupPt ?? (await geocodeAddress(addr, trip.origin)); // the exact spot picked, or the address found on the map
     const { error } = await supabase.rpc("request_seat", { p_trip: trip.id, p_seats: seats });
     if (error) { setBusy(false); return setError(error.message); }
     await supabase.rpc("set_booking_payment", { p_trip: trip.id, p_method: pay }); // saves how you plan to pay (cash by default)
+    const saved = await supabase.rpc("set_booking_pickup", { p_trip: trip.id, p_address: addr, p_lat: pt?.latitude ?? null, p_lng: pt?.longitude ?? null });
     setBusy(false);
+    if (saved.error) Alert.alert("Seat requested", "Your pickup address could not be saved. Message your driver the address once they accept.");
     onRequested();
   };
 
   return (
-    <Modal visible={!!trip} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal visible={!!trip} transparent animationType="slide" onRequestClose={() => (picking ? setPicking(false) : onClose())}>
       <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-        {trip && (
+        {trip && picking && (
+          <PickupPickerView
+            town={trip.origin}
+            initial={{ address: pickup, pt: pickupPt }}
+            onCancel={() => setPicking(false)}
+            onDone={(r) => { setPickup(r.address); setPickupPt(r.pt); setPicking(false); setError(""); }}
+          />
+        )}
+        {trip && !picking && (
           <View style={[s.card, { borderRadius: 24, padding: 24 }]}>
             <View style={[s.row, { justifyContent: "space-between", marginBottom: 16 }]}>
               <T style={{ fontWeight: "600", fontSize: 18 }}>Trip details</T>
@@ -2483,6 +3002,21 @@ function TripModal({ trip, onClose, onRequested }: { trip: OpenTrip | null; onCl
                 <PaymentOptions compact value={pay} onChange={setPay} />
                 <T style={[s.muted, { fontSize: 12, marginTop: 8 }]}>
                   {pay === "cash" ? "You pay the driver in cash when you travel. Card and EFT are coming soon." : "Online payment is coming soon."}
+                </T>
+              </View>
+            )}
+            {left > 0 && (
+              <View style={{ marginTop: 16 }}>
+                <T style={[s.muted, { marginBottom: 8 }]}>Pickup spot</T>
+                <Pressable onPress={() => setPicking(true)} style={[s.row, { backgroundColor: C.secondary, borderRadius: 12, borderWidth: 1, borderColor: C.border, paddingHorizontal: 12, paddingVertical: 12 }]}>
+                  <MapPin size={16} color={C.primary} />
+                  <T style={{ marginLeft: 12, flex: 1, color: pickup || pickupPt ? C.fg : C.muted }} numberOfLines={2}>
+                    {pickup || (pickupPt ? "Pinned location" : "Choose your exact pickup spot")}
+                  </T>
+                  <T style={{ color: C.primary, fontSize: 13, marginLeft: 8 }}>{pickup || pickupPt ? "Change" : "Choose"}</T>
+                </Pressable>
+                <T style={[s.muted, { fontSize: 12, marginTop: 6 }]}>
+                  {pickupPt ? "Exact spot saved. Your driver is guided right to you." : pickup ? "Address saved. Pin the exact spot for a better route." : "Search your address or drop a pin on the map."}
                 </T>
               </View>
             )}
@@ -2793,7 +3327,7 @@ function HomeScreen({ onProfile, prefill, onPrefillUsed, onRequested }: {
           </View>
         ) : (
           <View pointerEvents="none" style={{ position: "absolute", bottom: 16, left: 0, right: 0, alignItems: "center" }}>
-            <T style={[s.chip, { backgroundColor: C.card }]}>Tap the map to pin where you're going</T>
+            <T style={[s.chip, { backgroundColor: C.card, borderColor: C.border, color: C.fg2, fontWeight: "400" }]}>Tap the map to pin where you're going</T>
           </View>
         )}
       </View>
@@ -2809,12 +3343,12 @@ function ServicesScreen() {
       <T mono style={[s.muted, { marginBottom: 4 }]}>MzansiLift</T>
       <T style={s.h2}>Services</T>
       <Pressable onPress={() => startBooking()} style={[s.row, s.bookTrip]}>
-        <View style={s.tripIcon}><Car size={22} color="#fff" /></View>
+        <View style={[s.tripIcon, { backgroundColor: "rgba(255,255,255,0.2)" }]}><Car size={22} color="#fff" /></View>
         <View style={{ flex: 1, marginLeft: 16 }}>
-          <T style={{ fontWeight: "600" }}>Book a trip</T>
-          <T style={[s.muted, { marginTop: 2 }]}>Find a driver heading your way</T>
+          <T style={{ fontWeight: "600", color: "#fff" }}>Book a trip</T>
+          <T style={[s.muted, { marginTop: 2, color: "rgba(255,255,255,0.8)" }]}>Find a driver heading your way</T>
         </View>
-        <ChevronRight size={16} color={C.primary} />
+        <ChevronRight size={16} color="#fff" />
       </Pressable>
       <Label>Available provinces</Label>
       {PROVINCES.map((p) => (
@@ -2882,7 +3416,7 @@ const bookingLabel = (b: MyBooking) => {
   return b.status === "accepted" ? "Confirmed" : "Waiting for driver";
 };
 const pillStyle = (label: string) => {
-  if (label === "Confirmed" || label === "Completed") return { color: C.green, backgroundColor: "rgba(74,222,128,0.1)", borderColor: "rgba(74,222,128,0.25)" };
+  if (label === "Confirmed" || label === "Completed") return { color: "#fff", backgroundColor: SOLID.green, borderColor: SOLID.green, fontWeight: "600" as const };
   if (label === "Waiting for driver") return { color: C.amber, backgroundColor: "rgba(245,158,11,0.1)", borderColor: "rgba(245,158,11,0.25)" };
   if (label === "Expired") return { color: C.muted, backgroundColor: "rgba(86,96,120,0.1)", borderColor: "rgba(86,96,120,0.25)" };
   return { color: C.danger, backgroundColor: "rgba(239,68,68,0.1)", borderColor: "rgba(239,68,68,0.25)" };
@@ -2897,6 +3431,7 @@ function ActivityScreen() {
   const [cancelId, setCancelId] = useState<string | null>(null);
   const [chat, setChat] = useState<{ id: string; title: string } | null>(null);
   const [track, setTrack] = useState<MyBooking | null>(null);
+  const [reportFor, setReportFor] = useState<{ id: string; name: string } | null>(null);
   const [requests, setRequests] = useState<MyRequest[]>([]);
   const [pays, setPays] = useState<Record<string, string>>({});
   const knownUpdates = React.useRef<Set<string> | null>(null);
@@ -3000,14 +3535,14 @@ function ActivityScreen() {
                       {r.depart_at ? fmtWhen(r.depart_at) : requestWhen(r)}{r.price != null ? ` · R${r.price} per seat` : ""}
                     </T>
                     <View style={[s.row, s.cardFoot, { marginTop: 12 }]}>
-                      <Pressable onPress={() => dismissUpdate(r.id)} style={s.cancelPill}>
-                        <T style={{ fontSize: 12, color: C.muted }}>Dismiss</T>
+                      <Pressable onPress={() => dismissUpdate(r.id)} style={[s.cancelPill, s.pillNeutral]}>
+                        <T style={[s.pillTxt, { color: C.fg }]}>Dismiss</T>
                       </Pressable>
                       <Pressable
                         onPress={() => { dismissUpdate(r.id); startBooking({ pickup: r.origin ?? "", dest: r.destination }); }}
-                        style={[s.cancelPill, { borderColor: "rgba(37,99,235,0.4)" }]}
+                        style={[s.cancelPill, s.pillBlue]}
                       >
-                        <T style={{ fontSize: 12, color: C.primary }}>Book a seat</T>
+                        <T style={s.pillTxt}>Book a seat</T>
                       </Pressable>
                     </View>
                   </View>
@@ -3047,7 +3582,7 @@ function ActivityScreen() {
                       )}
                     </View>
                     <Pressable onPress={() => setCancelId(b.booking_id)} style={s.cancelPill}>
-                      <T style={{ fontSize: 12, color: C.danger }}>Cancel</T>
+                      <T style={s.pillTxt}>Cancel</T>
                     </Pressable>
                   </View>
                   {b.status === "accepted" && (
@@ -3085,7 +3620,7 @@ function ActivityScreen() {
                 <View style={[s.row, s.cardFoot]}>
                   <T style={[s.muted, { flex: 1, paddingRight: 8, lineHeight: 17 }]}>Waiting for a driver to post this trip. We'll update you here.</T>
                   <Pressable onPress={() => cancelRequest(r.id)} style={s.cancelPill}>
-                    <T style={{ fontSize: 12, color: C.danger }}>Cancel</T>
+                    <T style={s.pillTxt}>Cancel</T>
                   </Pressable>
                 </View>
               </View>
@@ -3108,10 +3643,18 @@ function ActivityScreen() {
                   </View>
                   <View style={[s.row, { justifyContent: "space-between" }]}>
                     <T mono style={s.muted}>{fmtWhen(b.depart_at)} · {label}</T>
-                    <Pressable onPress={() => startBooking({ pickup: b.origin, dest: b.destination })} style={s.row}>
-                      <RotateCcw size={11} color={C.primary} />
-                      <T style={{ fontSize: 12, color: C.primary, marginLeft: 4 }}>Rebook</T>
-                    </Pressable>
+                    <View style={[s.row, { gap: 16 }]}>
+                      {label === "Completed" && (
+                        <Pressable onPress={() => setReportFor({ id: b.booking_id, name: b.driver_name })} style={s.row}>
+                          <Flag size={11} color={C.muted} />
+                          <T style={{ fontSize: 12, color: C.muted, marginLeft: 4 }}>Report</T>
+                        </Pressable>
+                      )}
+                      <Pressable onPress={() => startBooking({ pickup: b.origin, dest: b.destination })} style={s.row}>
+                        <RotateCcw size={11} color={C.primary} />
+                        <T style={{ fontSize: 12, color: C.primary, marginLeft: 4 }}>Rebook</T>
+                      </Pressable>
+                    </View>
                   </View>
                 </View>
               );
@@ -3147,6 +3690,7 @@ function ActivityScreen() {
         onMessage={(b) => { setTrack(null); setTimeout(() => setChat({ id: b.booking_id, title: b.driver_name }), 400); }}
       />
       <ChatModal bookingId={chat?.id ?? null} title={chat?.title ?? ""} onClose={() => setChat(null)} />
+      <ReportModal bookingId={reportFor?.id ?? null} name={reportFor?.name ?? ""} onClose={() => setReportFor(null)} />
       <Modal visible={cancelId !== null} transparent animationType="slide" onRequestClose={() => setCancelId(null)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end", padding: 16 }}>
           <View style={[s.card, { borderRadius: 24, padding: 24 }]}>
@@ -3158,9 +3702,9 @@ function ActivityScreen() {
               </Pressable>
               <Pressable
                 onPress={() => { const id = cancelId; setCancelId(null); if (id) cancelBooking(id); }}
-                style={[s.modalBtn, { backgroundColor: C.danger }]}
+                style={[s.modalBtn, { backgroundColor: SOLID.red }]}
               >
-                <T style={{ color: "#fff", fontWeight: "500" }}>Yes, cancel</T>
+                <T style={{ color: "#fff", fontWeight: "600" }}>Yes, cancel</T>
               </Pressable>
             </View>
           </View>
@@ -3213,11 +3757,11 @@ function AccountScreen() {
         ))}
       </View>
       <View style={{ paddingHorizontal: 16, marginTop: 24 }}>
-        <Pressable onPress={user ? () => setUser(null) : openAuth} style={[s.dangerOutline, { borderRadius: 16 }]}>
-          <T style={{ color: user ? C.danger : C.primary, fontWeight: "500" }}>{user ? "Sign out" : "Sign in"}</T>
+        <Pressable onPress={user ? () => setUser(null) : openAuth} style={[s.dangerOutline, { borderRadius: 16 }, !user && { backgroundColor: SOLID.blue }]}>
+          <T style={{ color: "#fff", fontWeight: "600" }}>{user ? "Sign out" : "Sign in"}</T>
         </Pressable>
       </View>
-      <T mono style={[s.muted, { textAlign: "center", marginTop: 24 }]}>MzansiLift v1.0.0 · South Africa</T>
+      <T mono style={[s.muted, { textAlign: "center", marginTop: 24 }]}>MzansiLift v{APP_VERSION} · South Africa</T>
       <ManageAccountModal visible={manageOpen} onClose={() => setManageOpen(false)} />
       <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <PaymentModal visible={payOpen} onClose={() => setPayOpen(false)} />
@@ -3226,14 +3770,247 @@ function AccountScreen() {
   );
 }
 
+// ---------- Inbox ----------
+// One conversation per accepted booking. "Unread" is tracked on this phone: each conversation remembers the time you last
+// read it, and any message from the other person after that time counts as new. (No database change needed.)
+type Convo = {
+  id: string; name: string; route: string; when: string | null; role: "rider" | "driver"; open: boolean;
+  last: ChatMsg | null; incoming: string[];
+};
+const ts = (iso: string) => new Date(iso).getTime();
+const InboxCtx = React.createContext<{ markSeen: (bookingId: string, at: string) => void }>({ markSeen: () => { } });
+
+function useInbox(userId: string | undefined, isDriver: boolean) {
+  const [rows, setRows] = useState<Convo[]>([]);
+  const [seen, setSeen] = useState<Record<string, number>>({});
+  const [ready, setReady] = useState(false);
+  const seenRef = React.useRef<Record<string, number>>({});
+  const firstRun = React.useRef(false);
+  const key = `mzl.inbox.seen.${userId}`;
+
+  // Saved "last read" times for this account
+  useEffect(() => {
+    setRows([]); setSeen({}); seenRef.current = {}; setReady(false); firstRun.current = false;
+    if (!userId) return;
+    AsyncStorage.getItem(key)
+      .then((v) => { if (v) { const m = JSON.parse(v); seenRef.current = m; setSeen(m); } else firstRun.current = true; })
+      .catch(() => { })
+      .finally(() => setReady(true));
+  }, [userId]);
+
+  const markSeen = (id: string, at: string) => {
+    const ms = ts(at);
+    if ((seenRef.current[id] ?? 0) >= ms) return;
+    const next = { ...seenRef.current, [id]: ms };
+    seenRef.current = next; setSeen(next);
+    AsyncStorage.setItem(key, JSON.stringify(next)).catch(() => { });
+  };
+
+  const load = async () => {
+    if (!userId || !ready) return;
+    const [rb, tr] = await Promise.all([
+      supabase.from("rider_bookings").select("*"),
+      isDriver ? supabase.from("trips").select("*, bookings(*)").eq("driver_id", userId) : Promise.resolve({ data: [], error: null } as any),
+    ]);
+    const base: Omit<Convo, "last" | "incoming">[] = [];
+    if (!rb.error) {
+      for (const b of (rb.data ?? []) as MyBooking[]) {
+        if (b.status !== "accepted" || b.trip_status === "cancelled") continue;
+        base.push({ id: b.booking_id, name: b.driver_name, route: `${b.origin} → ${b.destination}`, when: b.depart_at, role: "rider", open: b.trip_status === "open" });
+      }
+    }
+    if (!tr.error) {
+      for (const t of (tr.data ?? []) as MyTrip[]) {
+        if (t.status === "cancelled") continue;
+        for (const b of t.bookings ?? []) {
+          if (b.status !== "accepted") continue;
+          base.push({ id: b.id, name: b.rider_name, route: `${t.origin} → ${t.destination}`, when: t.depart_at, role: "driver", open: t.status === "open" });
+        }
+      }
+    }
+    const full: Convo[] = await Promise.all(base.map(async (c) => {
+      const { data, error } = await supabase.rpc("get_trip_messages", { p_booking: c.id });
+      const msgs = error ? [] : ((data ?? []) as ChatMsg[]);
+      const last = msgs.reduce<ChatMsg | null>((a, m) => (!a || ts(m.created_at) > ts(a.created_at) ? m : a), null);
+      return { ...c, last, incoming: msgs.filter((m) => !m.mine).map((m) => m.created_at) };
+    }));
+    // First time on this phone: treat existing messages as already read so only genuinely new ones show up
+    if (firstRun.current) {
+      firstRun.current = false;
+      const seed: Record<string, number> = {};
+      full.forEach((c) => { if (c.incoming.length) seed[c.id] = Math.max(...c.incoming.map(ts)); });
+      seenRef.current = seed; setSeen(seed);
+      AsyncStorage.setItem(key, JSON.stringify(seed)).catch(() => { });
+    }
+    setRows(full.filter((c) => c.last || c.open));
+  };
+
+  // Loads on sign-in, then every 20s so the badge on the Inbox tab updates by itself
+  const loadRef = React.useRef(load);
+  loadRef.current = load;
+  useEffect(() => {
+    if (!userId || !ready) return;
+    loadRef.current();
+    const t = setInterval(() => loadRef.current(), 20000);
+    return () => clearInterval(t);
+  }, [userId, ready, isDriver]);
+
+  const blocked = useBlockedBookings();
+  const convos = rows
+    .filter((c) => !blocked.has(c.id))
+    .map((c) => ({ ...c, unread: c.incoming.filter((t) => ts(t) > (seen[c.id] ?? 0)).length }))
+    .sort((a, b) => {
+      const ta = a.last ? ts(a.last.created_at) : 0, tb = b.last ? ts(b.last.created_at) : 0;
+      return tb - ta || (a.when && b.when ? ts(a.when) - ts(b.when) : 0);
+    });
+  const unread = convos.reduce((n, c) => n + c.unread, 0);
+  return { convos, unread, markSeen, refresh: () => loadRef.current() };
+}
+
+const msgTime = (iso: string) => {
+  const d = new Date(iso), now = new Date();
+  if (d.toDateString() === now.toDateString()) return `${two(d.getHours())}:${two(d.getMinutes())}`;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return "Yesterday";
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+};
+
+function InboxScreen({ inbox }: { inbox: ReturnType<typeof useInbox> }) {
+  const { user, openAuth } = React.useContext(AuthCtx);
+  const [chat, setChat] = useState<{ id: string; title: string } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const { convos, unread } = inbox;
+
+  useEffect(() => { inbox.refresh(); }, []); // fresh list whenever the tab opens
+  const refresh = async () => { setRefreshing(true); await inbox.refresh(); setRefreshing(false); };
+
+  return (
+    <>
+      <ScrollView
+        contentContainerStyle={{ padding: 16, paddingTop: 24 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={C.primary} />}
+      >
+        <T mono style={[s.muted, { marginBottom: 4 }]}>Messages</T>
+        <T style={s.h2}>Inbox</T>
+
+        {!user ? (
+          <View style={[s.card, { alignItems: "center", paddingVertical: 32 }]}>
+            <T style={{ fontWeight: "600", marginBottom: 6 }}>Sign in to see your messages</T>
+            <T style={[s.muted, { textAlign: "center", marginBottom: 16 }]}>Chats with your drivers and riders appear here.</T>
+            <Pressable onPress={() => openAuth()} style={[s.primaryBtn, { paddingHorizontal: 32 }]}>
+              <T style={s.primaryTxt}>Sign in</T>
+            </Pressable>
+          </View>
+        ) : (
+          <>
+            {unread > 0 ? (
+              <View style={[s.row, { backgroundColor: SOLID.blue, borderRadius: 16, padding: 16, marginBottom: 24 }]}>
+                <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" }}>
+                  <Mail size={22} color="#fff" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 14 }}>
+                  <T style={{ color: "#fff", fontWeight: "700", fontSize: 16 }}>You have {unread} new {unread === 1 ? "message" : "messages"}</T>
+                  <T style={{ color: "rgba(255,255,255,0.8)", fontSize: 12, marginTop: 2 }}>Tap a conversation to read and reply.</T>
+                </View>
+              </View>
+            ) : (
+              <View style={[s.card, s.row, { marginBottom: 24 }]}>
+                <View style={[s.menuIcon, { width: 44, height: 44, borderRadius: 22 }]}>
+                  <MailOpen size={20} color={C.muted} />
+                </View>
+                <View style={{ flex: 1, marginLeft: 14 }}>
+                  <T style={{ fontWeight: "600" }}>No new messages</T>
+                  <T style={[s.muted, { marginTop: 2 }]}>You're all caught up.</T>
+                </View>
+              </View>
+            )}
+
+            <Label>Conversations</Label>
+            {convos.length === 0 && (
+              <T style={[s.muted, { lineHeight: 18 }]}>
+                No conversations yet. Once a driver accepts a seat, you can message each other here.
+              </T>
+            )}
+            {convos.map((c) => {
+              const preview = c.last ? `${c.last.mine ? "You: " : ""}${c.last.body}` : "No messages yet. Say hello!";
+              return (
+                <Pressable
+                  key={c.id}
+                  onPress={() => setChat({ id: c.id, title: c.name })}
+                  style={[s.card, { marginBottom: 12 }, c.unread > 0 && { borderColor: SOLID.blue }]}
+                >
+                  <View style={s.row}>
+                    <View style={s.avatar}><T style={s.avatarTxt}>{initialsOf(c.name || "?") || "?"}</T></View>
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <View style={[s.row, { justifyContent: "space-between" }]}>
+                        <T style={{ fontWeight: c.unread > 0 ? "700" : "600", flexShrink: 1 }} numberOfLines={1}>{c.name}</T>
+                        {!!c.last && <T mono style={[s.muted, { fontSize: 10, marginLeft: 8 }]}>{msgTime(c.last.created_at)}</T>}
+                      </View>
+                      <T mono style={[s.muted, { fontSize: 11, marginTop: 2 }]} numberOfLines={1}>
+                        {c.role === "driver" ? "Rider" : "Driver"} · {c.route}
+                      </T>
+                      <T style={{ marginTop: 6, color: c.unread > 0 ? C.fg : C.muted, fontWeight: c.unread > 0 ? "600" : "400" }} numberOfLines={1}>{preview}</T>
+                    </View>
+                    {c.unread > 0 && (
+                      <View style={[s.unreadBadge, { marginLeft: 8 }]}>
+                        <T style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>{c.unread}</T>
+                      </View>
+                    )}
+                  </View>
+                </Pressable>
+              );
+            })}
+          </>
+        )}
+      </ScrollView>
+      <ChatModal bookingId={chat?.id ?? null} title={chat?.title ?? ""} onClose={() => { setChat(null); inbox.refresh(); }} />
+    </>
+  );
+}
+
 // ---------- Navigation ----------
 const NAV = [
   { id: "home", icon: Home, label: "Home" },
   { id: "services", icon: Layers, label: "Services" },
   { id: "activity", icon: Activity, label: "Activity" },
+  { id: "inbox", icon: Mail, label: "Inbox" },
   { id: "account", icon: User, label: "Account" },
 ];
 const RIDER_TABS = ["home", "services", "activity"];
+
+// ---------- Push notifications ----------
+// Shows alerts even while the app is open
+try {
+  Notifications?.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true, shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false,
+    }),
+  });
+} catch { /* not supported in this build */ }
+
+let registeredPushToken: string | null = null;
+async function registerForPush() {
+  if (!Notifications) return;
+  try {
+    if (Platform.OS === "android") {
+      await Notifications.setNotificationChannelAsync("default", { name: "MzansiLift", importance: Notifications.AndroidImportance.HIGH });
+    }
+    let { status } = await Notifications.getPermissionsAsync();
+    if (status !== "granted") ({ status } = await Notifications.requestPermissionsAsync());
+    if (status !== "granted") return;
+    const projectId = (Constants.expoConfig as any)?.extra?.eas?.projectId ?? (Constants as any).easConfig?.projectId;
+    const { data: token } = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined);
+    registeredPushToken = token;
+    await supabase.rpc("register_push_token", { p_token: token, p_platform: Platform.OS });
+  } catch (e: any) { Alert.alert("Push setup failed", String(e?.message ?? e)); }
+}
+// Call before signing out so this phone stops getting the old account's notifications
+async function unregisterPush() {
+  const t = registeredPushToken;
+  registeredPushToken = null;
+  if (!t) return;
+  try { await supabase.from("push_tokens").delete().eq("token", t); } catch { /* ignore */ }
+}
 
 export default function App() {
   const [tab, setTab] = useState("home");
@@ -3255,7 +4032,7 @@ export default function App() {
     // Makes native alerts, the keyboard and system dialogs follow the in-app choice
     Appearance.setColorScheme(settings.theme === "system" ? "unspecified" : settings.theme);
   }, [settings.theme]);
-  
+
   // Saved settings (mode, map options)
   useEffect(() => {
     AsyncStorage.getItem("mzl.settings")
@@ -3289,9 +4066,22 @@ export default function App() {
     setIsDriver(!!data);
   };
   useEffect(() => { checkDriver(user?.id); }, [user?.id]);
+  useEffect(() => { if (user?.id) loadBlocked(); else setBlocked([]); }, [user?.id]); // who you have blocked
+  useEffect(() => { if (user?.id) registerForPush(); }, [user?.id]); // saves this phone's push address for the signed-in user
+  const inbox = useInbox(user?.id, isDriver); // new-message tracking for the Inbox tab and its badge
+  // Tapping a notification opens the matching tab (chat messages open the Inbox)
+  useEffect(() => {
+    if (!Notifications) return;
+    const sub = Notifications.addNotificationResponseReceivedListener((r: any) => {
+      const d = r?.notification?.request?.content?.data;
+      if (d?.type === "chat") setTab("inbox");
+      else if (d?.tab) setTab(d.tab);
+    });
+    return () => sub.remove();
+  }, []);
 
   const setUser = (u: UserT | null) => {
-    if (!u) { supabase.auth.signOut(); return; }
+    if (!u) { unregisterPush().finally(() => supabase.auth.signOut()); return; }
     supabase.auth
       .updateUser({ data: { full_name: u.name, phone: u.phone } })
       .then(({ error }) => { if (error) Alert.alert("Could not save", error.message); });
@@ -3327,45 +4117,55 @@ export default function App() {
   };
 
   const showWelcome = !loading && !user && !guest;
-  const navItems = isDriver ? [NAV[0], NAV[1], NAV[2], { id: "drive", icon: Car, label: "Drive" }, NAV[3]] : NAV;
+  const navItems = isDriver ? [NAV[0], NAV[1], NAV[2], { id: "drive", icon: Car, label: "Drive" }, NAV[3], NAV[4]] : NAV;
 
   return (
     <SettingsCtx.Provider value={{ settings, update }}>
       <AuthCtx.Provider value={{ user, setUser, openAuth: () => openAuth("signin"), openDriver: () => setDriverOpen(true), startBooking, isDriver }}>
-        <SafeAreaView key={themeName} style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
-          <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
-          {loading || !settingsLoaded ? null : showWelcome ? (
-            <WelcomeScreen onLogin={() => openAuth("signin")} onSignup={() => openAuth("signup")} onGuest={() => setGuest(true)} />
-          ) : (
-            <>
-              <View style={{ flex: 1 }}>
-                {mode === "rider" && tab === "home" && <HomeScreen onProfile={() => setTab("account")} prefill={prefill} onPrefillUsed={() => setPrefill(null)} onRequested={() => setTab("activity")} />}
-                {mode === "rider" && tab === "services" && <ServicesScreen />}
-                {mode === "rider" && tab === "activity" && <ActivityScreen />}
-                {mode === "driver" && tab === "drive" && <DriverScreen onEditProfile={() => setDriverOpen(true)} refreshKey={driverRev} />}
-                {tab === "account" && <AccountScreen />}
-              </View>
-              <View style={s.nav}>
-                {navItems.map(({ id, icon: Icon, label }) => {
-                  const on = tab === id;
-                  const off = isOff(id);
-                  return (
-                    <Pressable key={id} onPress={() => pressTab(id)} style={{ flex: 1, alignItems: "center", paddingVertical: 12, gap: 4, opacity: off ? 0.3 : 1 }}>
-                      <Icon size={20} color={on ? C.primary : C.muted} strokeWidth={on ? 2 : 1.5} />
-                      <T mono style={{ fontSize: 10, letterSpacing: 0.5, color: on ? C.primary : C.muted }}>{label}</T>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </>
-          )}
-          <AuthModal visible={authOpen} onClose={() => setAuthOpen(false)} initialMode={authMode} />
-          <DriverProfileModal
-            visible={driverOpen}
-            onClose={() => { setDriverOpen(false); setDriverRev((r) => r + 1); }}
-            onRegistered={async () => { await checkDriver(user?.id); update({ mode: "driver" }); setTab("drive"); }}
-          />
-        </SafeAreaView>
+        <InboxCtx.Provider value={{ markSeen: inbox.markSeen }}>
+          <SafeAreaView key={themeName} style={{ flex: 1, backgroundColor: C.bg, paddingTop: TOP }}>
+            <StatusBar barStyle={THEME === "dark" ? "light-content" : "dark-content"} />
+            {loading || !settingsLoaded ? null : showWelcome ? (
+              <WelcomeScreen onLogin={() => openAuth("signin")} onSignup={() => openAuth("signup")} onGuest={() => setGuest(true)} />
+            ) : (
+              <>
+                <View style={{ flex: 1 }}>
+                  {mode === "rider" && tab === "home" && <HomeScreen onProfile={() => setTab("account")} prefill={prefill} onPrefillUsed={() => setPrefill(null)} onRequested={() => setTab("activity")} />}
+                  {mode === "rider" && tab === "services" && <ServicesScreen />}
+                  {mode === "rider" && tab === "activity" && <ActivityScreen />}
+                  {mode === "driver" && tab === "drive" && <DriverScreen onEditProfile={() => setDriverOpen(true)} refreshKey={driverRev} />}
+                  {tab === "inbox" && <InboxScreen inbox={inbox} />}
+                  {tab === "account" && <AccountScreen />}
+                </View>
+                <View style={s.nav}>
+                  {navItems.map(({ id, icon: Icon, label }) => {
+                    const on = tab === id;
+                    const off = isOff(id);
+                    return (
+                      <Pressable key={id} onPress={() => pressTab(id)} style={{ flex: 1, alignItems: "center", paddingVertical: 12, gap: 4, opacity: off ? 0.3 : 1 }}>
+                        <View>
+                          <Icon size={20} color={on ? C.primary : C.muted} strokeWidth={on ? 2 : 1.5} />
+                          {id === "inbox" && inbox.unread > 0 && (
+                            <View style={{ position: "absolute", top: -6, right: -10, minWidth: 16, height: 16, borderRadius: 8, paddingHorizontal: 4, backgroundColor: SOLID.red, alignItems: "center", justifyContent: "center" }}>
+                              <T style={{ color: "#fff", fontSize: 9, fontWeight: "700" }}>{inbox.unread > 9 ? "9+" : inbox.unread}</T>
+                            </View>
+                          )}
+                        </View>
+                        <T mono style={{ fontSize: 10, letterSpacing: 0.5, color: on ? C.primary : C.muted }}>{label}</T>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+            <AuthModal visible={authOpen} onClose={() => setAuthOpen(false)} initialMode={authMode} />
+            <DriverProfileModal
+              visible={driverOpen}
+              onClose={() => { setDriverOpen(false); setDriverRev((r) => r + 1); }}
+              onRegistered={async () => { await checkDriver(user?.id); update({ mode: "driver" }); setTab("drive"); }}
+            />
+          </SafeAreaView>
+        </InboxCtx.Provider>
       </AuthCtx.Provider>
     </SettingsCtx.Provider>
   );
@@ -3382,27 +4182,35 @@ const makeStyles = () => StyleSheet.create({
   carThumb: { width: 52, height: 52, borderRadius: 14, backgroundColor: C.card, borderWidth: 1, borderColor: C.border, alignItems: "center", justifyContent: "center", overflow: "hidden" },
   avatarTxt: { color: C.primary, fontWeight: "600" },
   roundBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.secondary, borderWidth: 1, borderColor: C.border, alignItems: "center", justifyContent: "center" },
+  roundBtnBlue: { width: 36, height: 36, borderRadius: 18, backgroundColor: SOLID.blue, alignItems: "center", justifyContent: "center" },
   statsRow: { flexDirection: "row", marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.border },
-  dangerOutline: { paddingVertical: 12, borderWidth: 1, borderColor: "rgba(239,68,68,0.5)", borderRadius: 12, alignItems: "center" },
+  dangerOutline: { paddingVertical: 14, backgroundColor: SOLID.red, borderRadius: 12, alignItems: "center" },
   search: { backgroundColor: C.secondary, borderWidth: 1, borderColor: C.border, borderRadius: 16, paddingHorizontal: 16, paddingVertical: 14 },
   inputRow: { paddingHorizontal: 16, paddingVertical: 4 },
   input: { flex: 1, color: C.fg, fontSize: 14, paddingVertical: 8, marginLeft: 12 },
   dot: { width: 8, height: 8, borderRadius: 4 },
-  primaryBtn: { backgroundColor: C.primary, paddingVertical: 14, borderRadius: 16, alignItems: "center", justifyContent: "center" },
+  primaryBtn: { backgroundColor: SOLID.blue, paddingVertical: 14, borderRadius: 16, alignItems: "center", justifyContent: "center" },
   primaryTxt: { color: "#fff", fontWeight: "500" },
   sheet: { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: C.card, borderTopWidth: 1, borderColor: C.border, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
   handle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, backgroundColor: C.border, marginTop: 12, marginBottom: 8 },
   driver: { borderWidth: 1, borderColor: C.border, backgroundColor: C.secondary, borderRadius: 16, padding: 16 },
   plate: { backgroundColor: C.bg, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999, overflow: "hidden" },
-  bookTrip: { backgroundColor: "rgba(37,99,235,0.1)", borderWidth: 1, borderColor: "rgba(37,99,235,0.3)", borderRadius: 16, padding: 16, marginBottom: 24 },
+  bookTrip: { backgroundColor: SOLID.blue, borderWidth: 1, borderColor: SOLID.blue, borderRadius: 16, padding: 16, marginBottom: 24 },
   tripIcon: { width: 48, height: 48, borderRadius: 16, backgroundColor: C.primary, alignItems: "center", justifyContent: "center" },
   province: { backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 16, padding: 16 },
   soon: { borderWidth: 1, borderColor: C.border, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2, overflow: "hidden" },
   cities: { marginHorizontal: 16, padding: 16, backgroundColor: C.secondary, borderWidth: 1, borderTopWidth: 0, borderColor: C.border, borderBottomLeftRadius: 16, borderBottomRightRadius: 16 },
-  chip: { fontSize: 12, color: C.fg2, borderWidth: 1, borderColor: C.border, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 4, overflow: "hidden" },
+  chip: { fontSize: 12, color: "#fff", fontWeight: "600", backgroundColor: SOLID.blue, borderWidth: 1, borderColor: SOLID.blue, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 6, overflow: "hidden" },
   notice: { marginTop: 24, padding: 16, backgroundColor: C.secondary, borderWidth: 1, borderColor: C.border, borderRadius: 16 },
   booked: { fontSize: 12, color: C.primary, backgroundColor: "rgba(37,99,235,0.1)", borderWidth: 1, borderColor: "rgba(37,99,235,0.2)", borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2, overflow: "hidden" },
-  cancelPill: { borderWidth: 1, borderColor: "rgba(239,68,68,0.3)", borderRadius: 999, paddingHorizontal: 12, paddingVertical: 4 },
+  // Solid pill buttons. cancelPill is red by default; add pillGreen / pillBlue / pillNeutral to change the colour.
+  cancelPill: { backgroundColor: SOLID.red, borderWidth: 1, borderColor: SOLID.red, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 6, alignItems: "center", justifyContent: "center", flexDirection: "row" },
+  pillGreen: { backgroundColor: SOLID.green, borderColor: SOLID.green },
+  pillBlue: { backgroundColor: SOLID.blue, borderColor: SOLID.blue },
+  pillNeutral: { backgroundColor: C.secondary, borderColor: C.border },
+  pillTxt: { fontSize: 12, color: "#fff", fontWeight: "600" },
+  solidRed: { backgroundColor: SOLID.red, borderColor: SOLID.red },
+  unreadBadge: { minWidth: 22, height: 22, paddingHorizontal: 6, borderRadius: 11, backgroundColor: SOLID.blue, alignItems: "center", justifyContent: "center" },
   modalBtn: { flex: 1, paddingVertical: 12, borderRadius: 16, alignItems: "center" },
   menuItem: { paddingHorizontal: 16, paddingVertical: 14, borderRadius: 16 },
   menuIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: C.secondary, borderWidth: 1, borderColor: C.border, alignItems: "center", justifyContent: "center" },

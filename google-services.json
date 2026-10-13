@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "802981352551",
+    "project_id": "mzansilift",
+    "storage_bucket": "mzansilift.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:802981352551:android:982cce497380a8ce41b0c2",
+        "android_client_info": {
+          "package_name": "za.co.mzansilift"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyACuZ3JLg_snLnzVESTcJDxsBA72qdwNOY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
